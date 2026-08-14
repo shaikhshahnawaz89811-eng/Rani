@@ -19,6 +19,7 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.os.BatteryManager
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.compose.ui.*
@@ -55,6 +56,13 @@ import com.sa.aidesktop.R
 private val manager = DesktopWindowManager()
 private val ai = OfflineDemoAI()
 
+// BUG FIX: the taskbar height (and the "+10f" breathing room above it) used to be a 58f/68f
+// magic number repeated in three places (workspace clamp, DesktopWindowView call, windowDefaults).
+// Pulling it into one constant lets the taskbar shrink to a more compact dock height (rule 8)
+// while keeping every downstream workspace/window calculation in sync automatically, in both
+// portrait and landscape, instead of drifting out of sync if only one call site were edited.
+private const val TASKBAR_HEIGHT = 50f
+
 
 
 @Composable fun SADesktopApp() {
@@ -83,11 +91,11 @@ private val ai = OfflineDemoAI()
             .windowInsetsPadding(WindowInsets.systemBars)
             .imePadding()
     ) {
-        LaunchedEffect(maxWidth.value, maxHeight.value) { manager.clampToWorkspace(maxWidth.value, (maxHeight.value - 58f).coerceAtLeast(1f)) }
+        LaunchedEffect(maxWidth.value, maxHeight.value) { manager.clampToWorkspace(maxWidth.value, (maxHeight.value - TASKBAR_HEIGHT).coerceAtLeast(1f)) }
         DesktopBackdrop()
         DesktopIcons(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it) })
         windows.filter { it.state != WindowState.MINIMIZED }.sortedBy { it.z }.forEach { w ->
-            DesktopWindowView(w, maxWidth.value, maxHeight.value - 58f, files, terminal)
+            DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal)
         }
         Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false }, Modifier.align(Alignment.BottomCenter))
         if (startOpen) StartMenu(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it); startOpen = false }, modifier = Modifier.align(Alignment.BottomStart))
@@ -121,15 +129,42 @@ private val ai = OfflineDemoAI()
     val context=LocalContext.current
     var battery by remember { mutableIntStateOf(-1) }
     var online by remember { mutableStateOf(false) }
+    // BUG FIX: AudioManager gives legitimate, permission-free access to adjust/show the real media
+    // volume (see the Volume icon below) without leaving the app for Settings.
+    val audioManager = remember(context) { context.getSystemService(AudioManager::class.java) }
     LaunchedEffect(Unit){ while(kotlinx.coroutines.currentCoroutineContext().isActive){ now=Date(); val bm=context.getSystemService(BatteryManager::class.java); battery=bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1; val cm=context.getSystemService(ConnectivityManager::class.java); online=cm?.activeNetwork?.let{cm.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)}==true; kotlinx.coroutines.delay(1000) } }
-    Row(modifier.fillMaxWidth().height(58.dp).background(Color(0xE80A0B14)).border(1.dp,Color(0x443D78FF)),verticalAlignment=Alignment.CenterVertically){
-        Spacer(Modifier.width(12.dp)); Surface(Modifier.size(38.dp).clickable(onClick=onStart),RoundedCornerShape(9.dp),color=Color(0xFF3D20A7)){Box(contentAlignment=Alignment.Center){Text("SA",fontWeight=FontWeight.Bold)}};Spacer(Modifier.width(10.dp))
+    // BUG FIX (screenshot: taskbar too tall/too much empty middle space): height dropped from a
+    // fixed 58.dp to the shared TASKBAR_HEIGHT (50.dp) compact-dock size, and the pinned icons plus
+    // system indicators now sit inside a horizontalScroll row so nothing gets clipped on narrow
+    // portrait widths while the row still only takes the space it actually needs.
+    Row(modifier.fillMaxWidth().height(TASKBAR_HEIGHT.dp).background(Color(0xE80A0B14)).border(1.dp,Color(0x443D78FF)),verticalAlignment=Alignment.CenterVertically){
+        Spacer(Modifier.width(10.dp)); Surface(Modifier.size(34.dp).clickable(onClick=onStart),RoundedCornerShape(9.dp),color=Color(0xFF3D20A7)){Box(contentAlignment=Alignment.Center){Text("SA",fontWeight=FontWeight.Bold,fontSize=12.sp,color=Color(0xFFF2F0FF))}};Spacer(Modifier.width(8.dp))
         val pinned=listOf(WindowType.DEVELOPER to Icons.Default.Code,WindowType.AI to Icons.Default.Face,WindowType.TERMINAL to Icons.Default.Terminal,WindowType.GIT to Icons.Default.AccountTree,WindowType.FILES to Icons.Default.Folder,WindowType.BROWSER to Icons.Default.Public)
-        pinned.forEach{(type,icon)->val open=windows.lastOrNull{it.type==type};Surface(Modifier.padding(horizontal=2.dp).size(42.dp).clickable{if(type==WindowType.BROWSER) manager.openNew(type) else onOpen(type)},RoundedCornerShape(9.dp),color=if(open?.focused==true)Color(0x443D78FF)else Color.Transparent){Box(contentAlignment=Alignment.Center){Icon(icon,type.name,tint=if(open!=null)Color(0xFFE1E7FF)else Color(0xFF7E89A8),modifier=Modifier.size(20.dp));if(open!=null)Box(Modifier.align(Alignment.BottomCenter).size(16.dp,2.dp).background(Color(0xFF9C5CFF),RoundedCornerShape(2.dp)))}}}
-        Spacer(Modifier.weight(1f));
-        Icon(if(online)Icons.Default.Wifi else Icons.Default.WifiOff,"Network",Modifier.size(18.dp).clickable{runCatching{context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))}},tint=Color(0xFFB9C7E8));Spacer(Modifier.width(10.dp));
-        Icon(Icons.Default.VolumeUp,"Volume",Modifier.size(18.dp).clickable{runCatching{context.startActivity(Intent(Settings.ACTION_SOUND_SETTINGS))}},tint=Color(0xFFB9C7E8));Spacer(Modifier.width(10.dp));
-        Icon(Icons.Default.BatteryFull,"Battery",Modifier.size(18.dp).clickable{runCatching{context.startActivity(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))}},tint=Color(0xFFB9C7E8));Spacer(Modifier.width(6.dp));if(battery>=0)Text("$battery%",fontSize=9.sp,color=Color(0xFFB9C7E8));Spacer(Modifier.width(10.dp));Column(horizontalAlignment=Alignment.End){Text(SimpleDateFormat("HH:mm",Locale.getDefault()).format(now),fontSize=12.sp);Text(SimpleDateFormat("dd/MM/yyyy",Locale.getDefault()).format(now),fontSize=9.sp,color=Color(0xFF9DA8C4))};Spacer(Modifier.width(14.dp))
+        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically){
+            pinned.forEach{(type,icon)->val open=windows.lastOrNull{it.type==type};Surface(Modifier.padding(horizontal=2.dp).size(36.dp).clickable{if(type==WindowType.BROWSER) manager.openNew(type) else onOpen(type)},RoundedCornerShape(9.dp),color=if(open?.focused==true)Color(0x443D78FF)else Color.Transparent){Box(contentAlignment=Alignment.Center){Icon(icon,type.name,tint=if(open!=null)Color(0xFFE1E7FF)else Color(0xFF7E89A8),modifier=Modifier.size(18.dp));if(open!=null)Box(Modifier.align(Alignment.BottomCenter).size(14.dp,2.dp).background(Color(0xFF9C5CFF),RoundedCornerShape(2.dp)))}}}
+        }
+        // BUG FIX: Wi-Fi/volume used to unconditionally launch the full Settings app, which is
+        // disruptive and (per the task) shouldn't be the only option when a legitimate in-app
+        // control exists. Volume now uses the real AudioManager media stream (no fake slider, no
+        // permission needed) to show Android's own volume UI in place. Wi-Fi cannot be toggled by
+        // apps targeting API 29+ (WifiManager.setWifiEnabled is a no-op for non-system apps since
+        // Android 10) - faking a toggle would misrepresent real device state - so this uses
+        // Settings.Panel.ACTION_WIFI, the least-disruptive legitimate control (an inline quick
+        // panel rather than leaving the app), falling back to the full Wi-Fi settings screen only
+        // if the panel intent isn't resolvable on this device.
+        Icon(if(online)Icons.Default.Wifi else Icons.Default.WifiOff,"Network",Modifier.size(17.dp).clickable{
+            runCatching{context.startActivity(Intent(Settings.Panel.ACTION_WIFI))}
+                .onFailure{runCatching{context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))}}
+        },tint=Color(0xFFB9C7E8));Spacer(Modifier.width(8.dp));
+        Icon(Icons.Default.VolumeUp,"Volume",Modifier.size(17.dp).clickable{
+            audioManager?.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
+        },tint=Color(0xFFB9C7E8));Spacer(Modifier.width(8.dp));
+        Icon(Icons.Default.BatteryFull,"Battery",Modifier.size(17.dp).clickable{runCatching{context.startActivity(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))}},tint=Color(0xFFB9C7E8));Spacer(Modifier.width(5.dp));if(battery>=0)Text("$battery%",fontSize=9.sp,color=Color(0xFFB9C7E8));Spacer(Modifier.width(8.dp))
+        // BUG FIX (screenshot: clock text almost black/invisible): the HH:mm Text() had no
+        // explicit color at all, so it inherited whatever low-contrast content color the theme
+        // provided. Both the time and date now use explicit light colors, and the real
+        // SimpleDateFormat(now) time source is unchanged (still updates every second above).
+        Column(horizontalAlignment=Alignment.End){Text(SimpleDateFormat("HH:mm",Locale.getDefault()).format(now),fontSize=12.sp,color=Color(0xFFF2F4FF),fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd/MM/yyyy",Locale.getDefault()).format(now),fontSize=8.sp,color=Color(0xFFB6C0E0))};Spacer(Modifier.width(10.dp))
     }
 }
 
@@ -159,14 +194,29 @@ private val ai = OfflineDemoAI()
         Column(Modifier.fillMaxSize()) {
             WindowTitleBar(w, screenW, screenH, width, height)
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                when(w.type){
-                    WindowType.DEVELOPER->DeveloperWindow(files)
-                    WindowType.AI->AIWindow()
-                    WindowType.TERMINAL->TerminalWindow(terminal)
-                    WindowType.GIT->GitWindow(files)
-                    WindowType.FILES->FilesWindow(files)
-                    WindowType.SETTINGS->SettingsWindow()
-                    WindowType.BROWSER->BrowserWindow(w.id)
+                // BUG FIX (terminal/window pointer isolation, rules 2 & 15): the resize-handle
+                // strips below used to sit in the exact same Box as the window content, fully
+                // overlapping it along every edge. On a short "mini" window (very common right
+                // after rotating to landscape, where available height shrinks a lot) the bottom
+                // resize band could cover the terminal's input row / a window's last visible
+                // pixels, so a tap meant for the input or a button, or a drag meant to scroll,
+                // could be captured by the resize gesture instead. Insetting the content by the
+                // handle's own thickness whenever the window is resizable keeps the true edge
+                // pixels reserved for resizing while guaranteeing the window's real content -
+                // including scrollable panes - is never drawn underneath a drag-only strip.
+                val contentModifier = if (w.state == WindowState.NORMAL)
+                    Modifier.fillMaxSize().padding(end = RESIZE_HANDLE_INSET, bottom = RESIZE_HANDLE_INSET)
+                else Modifier.fillMaxSize()
+                Box(contentModifier) {
+                    when(w.type){
+                        WindowType.DEVELOPER->DeveloperWindow(files)
+                        WindowType.AI->AIWindow()
+                        WindowType.TERMINAL->TerminalWindow(terminal)
+                        WindowType.GIT->GitWindow(files)
+                        WindowType.FILES->FilesWindow(files)
+                        WindowType.SETTINGS->SettingsWindow()
+                        WindowType.BROWSER->BrowserWindow(w.id)
+                    }
                 }
                 if(w.state==WindowState.NORMAL) ResizeHandle(w, width, height, screenW, screenH)
             }
@@ -175,7 +225,7 @@ private val ai = OfflineDemoAI()
 }
 
 private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): WindowBounds {
-    val usableH=(screenH-68f).coerceAtLeast(300f)
+    val usableH=(screenH-(TASKBAR_HEIGHT+10f)).coerceAtLeast(300f)
     val wide=screenW>=800f
     val developerW=(if(wide) 500f else screenW*0.64f).coerceIn(300f,620f)
     val developerH=(if(wide) 420f else usableH*0.64f).coerceIn(260f,500f)
@@ -192,8 +242,12 @@ private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): Wi
     }
 }
 
+// Shared with the content inset in DesktopWindowView so the resize-only strip and real window
+// content never occupy the exact same pixels (see the BUG FIX comment there).
+private val RESIZE_HANDLE_INSET = 12.dp
+
 @Composable private fun ResizeHandle(w: DesktopWindow, width: Float, height: Float, screenW: Float, screenH: Float) {
-    val handle = 12.dp
+    val handle = RESIZE_HANDLE_INSET
     fun drag(edge: ResizeEdge) = Modifier.pointerInput(w.id, edge) {
         detectDragGestures(
             onDragStart = { manager.focus(w.id) },
@@ -225,14 +279,23 @@ private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): Wi
     },verticalAlignment=Alignment.CenterVertically){
         Icon(Icons.Default.DragHandle,null,Modifier.size(16.dp),tint=if(w.focused) Color(0xFF8F9FC8) else Color(0xFF59627A))
         Text(w.title,Modifier.weight(1f).padding(start=6.dp),fontSize=12.sp,color=Color(0xFFE5E9F7),maxLines=1)
-        // BUG FIX (screenshot: minimize/maximize/close hard to see): these IconButtons had no
-        // explicit tint, so on some Compose/theme combinations they inherited a low-contrast
-        // content color and nearly disappeared against the dark title bar. Every control below
-        // now has an explicit, high-contrast tint plus a visible circular hit-target background,
-        // matching rule 4C (visible, touch-friendly, always reachable window controls).
-        IconButton({manager.minimize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x14FFFFFF))){Icon(Icons.Default.Remove,"Minimize",Modifier.size(16.dp),tint=Color(0xFFE7ECFB))}
-        IconButton({if(w.state==WindowState.MAXIMIZED)manager.restore(w.id)else manager.maximize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x14FFFFFF))){Icon(if(w.state==WindowState.MAXIMIZED)Icons.Default.FullscreenExit else Icons.Default.CropSquare,"Maximize",Modifier.size(14.dp),tint=Color(0xFFE7ECFB))}
-        IconButton({manager.close(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x26FF5C7A))){Icon(Icons.Default.Close,"Close",Modifier.size(16.dp),tint=Color(0xFFFFD3DC))}
+        // BUG FIX (latest screenshot: min/max/close look like "strange different-color blocks"):
+        // minimize and maximize previously used a translucent WHITE overlay (0x14FFFFFF) while
+        // close used a translucent PINK overlay (0x26FF5C7A) - on top of title bars that already
+        // swap between two background shades (focused/unfocused), those two different overlay
+        // hues rendered as visibly mismatched blocks instead of one consistent control family.
+        // All three buttons now share one flat, same-height, same-shape base surface color drawn
+        // from the title bar's own dark palette (not a translucent tint), so they read as one
+        // design regardless of focus state; close keeps a subtle same-family danger tint (a dark
+        // red base instead of the neutral base) rather than a different color system. This is a
+        // shared composable, so Developer/AI/every other window gets the fix at once.
+        val controlBase = Color(0xFF1C2036)
+        val closeBase = Color(0xFF3A1E29)
+        val iconTint = Color(0xFFEDEFFA)
+        val closeTint = Color(0xFFFF9FB2)
+        IconButton({manager.minimize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(controlBase)){Icon(Icons.Default.Remove,"Minimize",Modifier.size(16.dp),tint=iconTint)}
+        IconButton({if(w.state==WindowState.MAXIMIZED)manager.restore(w.id)else manager.maximize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(controlBase)){Icon(if(w.state==WindowState.MAXIMIZED)Icons.Default.FullscreenExit else Icons.Default.CropSquare,"Maximize",Modifier.size(14.dp),tint=iconTint)}
+        IconButton({manager.close(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(closeBase)){Icon(Icons.Default.Close,"Close",Modifier.size(16.dp),tint=closeTint)}
     }
 }
 
@@ -462,7 +525,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
         Row(Modifier.fillMaxWidth().height(52.dp).background(Color(0xFF10121D)).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
             Surface(Modifier.size(34.dp),RoundedCornerShape(10.dp),color=Color(0xFF4D1A78)){androidx.compose.foundation.Image(painterResource(R.drawable.sara_avatar),contentDescription="Sara",modifier=Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),contentScale=androidx.compose.ui.layout.ContentScale.Crop)}
-            Column(Modifier.padding(start=9.dp).weight(1f)){Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold);Text("Offline-ready • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))}
+            // BUG FIX (latest screenshot: Sara's name still hard to see): this Text() had no
+            // explicit color, so it inherited theme content color instead of a color chosen for
+            // this dark header. Explicit light color added; the status line beneath it already
+            // had an explicit (readable) color and is unchanged.
+            Column(Modifier.padding(start=9.dp).weight(1f)){Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF));Text("Offline-ready • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))}
             Text(if(busy) "Thinking…" else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
         }
         Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
@@ -530,6 +597,20 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     var input by remember{mutableStateOf("")}
     val initial=terminal.state()
     val out=remember{mutableStateListOf("SA Embedded Terminal","Workspace: ${initial.workingDirectory}","Type help for supported commands.","user@sa-desktop:~/MyProject$")}
+    fun runCommand(){
+        val r=terminal.execute(input); input=""
+        if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}"); out.add("user@sa-desktop:~/MyProject$") }
+    }
+    // BUG FIX (screenshot: taps around the terminal seemingly "sending" input): audited every
+    // pointer handler in this window. The scrollable output Column below has no clickable/
+    // pointerInput of its own (only its own verticalScroll gesture), the input TextField has no
+    // click listener attached (only onValueChange for typing), and runCommand() above is now the
+    // single place that calls terminal.execute - wired to exactly one control, the send IconButton
+    // below. Nothing in this composable can submit a command except that one explicit tap. The
+    // resize-handle overlap that could previously intercept taps near the bottom edge of a short/
+    // "mini" window is fixed separately in DesktopWindowView (content is now inset from the
+    // resize-only strip), which is what could make taps near "$" behave unpredictably after
+    // rotation shrank the window.
     Column(Modifier.fillMaxSize().background(Color(0xFF050609))){
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
         Row(Modifier.padding(8.dp),verticalAlignment=Alignment.CenterVertically){
@@ -550,10 +631,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 ),
                 textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF))
             )
-            IconButton({
-                val r=terminal.execute(input); input=""
-                if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}"); out.add("user@sa-desktop:~/MyProject$") }
-            }){Icon(Icons.Default.PlayArrow,"Run")}
+            IconButton(onClick={runCommand()},modifier=Modifier.size(34.dp)){Icon(Icons.Default.PlayArrow,"Run command",tint=Color(0xFF7AFF9B))}
         }
     }
 }
