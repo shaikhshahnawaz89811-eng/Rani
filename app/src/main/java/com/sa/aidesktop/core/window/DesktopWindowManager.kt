@@ -140,9 +140,36 @@ class DesktopWindowManager : WindowManager {
     }
 
     /** Keeps a window inside the current desktop work area after a resize/rotation. */
-    fun resizeWithinWorkspace(id: String, edge: ResizeEdge, dx: Float, dy: Float, workspaceWidth: Float, workspaceHeight: Float) {
+    fun resizeWithinWorkspace(
+        id: String,
+        edge: ResizeEdge,
+        dx: Float,
+        dy: Float,
+        workspaceWidth: Float,
+        workspaceHeight: Float
+    ) {
         resize(id, edge, dx, dy)
-        clampToWorkspace(workspaceWidth, workspaceHeight)
+
+        val maxWidth = workspaceWidth.coerceAtLeast(1f)
+        val maxHeight = workspaceHeight.coerceAtLeast(1f)
+
+        _windows.value = _windows.value.map { w ->
+            if (w.id != id || w.state != WindowState.NORMAL) {
+                w
+            } else {
+                val width = w.width.coerceIn(260f.coerceAtMost(maxWidth), maxWidth)
+                val height = w.height.coerceIn(180f.coerceAtMost(maxHeight), maxHeight)
+                val x = w.x.coerceIn(4f, (maxWidth - width - 4f).coerceAtLeast(4f))
+                val y = w.y.coerceIn(4f, (maxHeight - height - 4f).coerceAtLeast(4f))
+
+                w.copy(
+                    x = x,
+                    y = y,
+                    width = width,
+                    height = height
+                )
+            }
+        }
     }
 
     private fun update(id: String, transform: (DesktopWindow) -> DesktopWindow) {
