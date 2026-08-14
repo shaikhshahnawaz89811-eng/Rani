@@ -373,7 +373,7 @@ class AndroidBrowserService(
         }
     }
 
-    suspend fun currentUrl(windowId: String): String = onMain(windowId) { views[windowId]?.url.orEmpty() }
+    suspend fun currentUrl(windowId: String): String = onMain<String>(windowId) { views[windowId]?.url.orEmpty() }
 
     private suspend fun actionResult(windowId: String, js: String, action: String): BrowserResult<String> {
         val result = evaluate(windowId, js)
