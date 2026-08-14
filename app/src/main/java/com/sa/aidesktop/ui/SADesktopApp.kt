@@ -63,7 +63,25 @@ private val ai = OfflineDemoAI()
     val terminal = remember(context) { EmbeddedTerminalService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
     LaunchedEffect(Unit) { listOf(WindowType.DEVELOPER, WindowType.AI, WindowType.TERMINAL, WindowType.GIT, WindowType.FILES).forEach(manager::open); manager.focus("ai") }
     var startOpen by remember { mutableStateOf(false) }
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF050611))) {
+    // BUG FIX (video timestamps 00:05-00:25): enableEdgeToEdge() in MainActivity draws the
+    // Compose content underneath the Android status bar and navigation bar, but this Box
+    // previously never consumed those insets. That let window title bars (with the close/
+    // minimize/maximize controls) render partly under the status bar, where they overlapped
+    // the system clock/Wi-Fi/battery icons and were difficult or impossible to tap because the
+    // system status bar and gesture-navigation area sit on top of that space.
+    // windowInsetsPadding(WindowInsets.systemBars) shrinks the measured workspace to the real
+    // usable area (below the status bar, above the nav/gesture bar) so every downstream
+    // calculation - clampToWorkspace, windowDefaults, resizeWithinWorkspace - already works
+    // with correct bounds instead of the full physical screen. imePadding() additionally keeps
+    // the workspace (and any focused text field, e.g. the AI chat box or terminal input) above
+    // the on-screen keyboard instead of letting the keyboard cover it.
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0xFF050611))
+            .windowInsetsPadding(WindowInsets.systemBars)
+            .imePadding()
+    ) {
         LaunchedEffect(maxWidth.value, maxHeight.value) { manager.clampToWorkspace(maxWidth.value, (maxHeight.value - 58f).coerceAtLeast(1f)) }
         DesktopBackdrop()
         DesktopIcons(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it) })

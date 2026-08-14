@@ -13,6 +13,16 @@
 - Terminal timeout no longer waits indefinitely on a blocked output reader.
 - Missing ModelAdapter and ProjectManager concrete foundation implementations were added.
 
+## Fixed in Build 9 (video bug audit)
+- Root Compose layout now consumes `WindowInsets.systemBars` + IME insets, so
+  the workspace, window default positions, and clamping logic are computed
+  from the real usable screen area instead of the full physical screen. This
+  removes the status-bar overlap and unreachable top window controls seen in
+  the test recording.
+- `MainActivity` is locked to portrait (see below) to stop the rotation
+  render corruption seen in the test recording, rather than leaving rotation
+  unhandled.
+
 ## Still intentionally deferred
 1. A real packaged on-device LLM. `OfflineDemoAI` is a deterministic adapter used for architecture/testing. A real local model engine must be supplied for actual generative offline AI.
 2. Fully packaged language runtimes. Python/Node/Java/Clang availability is detected/used only when a compatible executable/runtime exists. The APK does not secretly contain all toolchains.
@@ -21,5 +31,24 @@
 5. Full offline STT. Android SpeechRecognizer may depend on device speech services. The interface is replaceable so an offline engine can be added later.
 6. Full browser feature set such as downloads, file upload mediation, multiple-page tab strip, bookmarks, history database, and content permissions.
 7. Full edge-resize cursor feedback and snap-to-edge behavior. Geometry behavior is implemented; visual cursor affordances can be added later.
+8. **Landscape/multi-orientation desktop support.** Build 9 locks the app to
+   portrait (`android:screenOrientation="portrait"`) instead of implementing
+   full landscape re-flow, because the window manager's default positions,
+   taskbar, and panel sizing are hand-tuned for one canvas shape and
+   correctly re-flowing every open window, the taskbar, and IME handling for
+   a second orientation is a distinct feature, not a one-line fix. Tracked as
+   future work; `DesktopWindowManager.resizeWithinWorkspace`/
+   `clampToWorkspace` already accept arbitrary workspace dimensions, so a
+   landscape layout can build on top of them later.
+9. **Rani Mini Assistant (offline small-model conversational/coding
+   assistant), Rani-specific package manager (`rani install/remove/...`),
+   sandboxed Android userspace runtime, and offline STT/TTS voice pipeline**
+   described in later product proposals are architecture-only proposals at
+   this point. None of this exists in the codebase yet. Building any of it
+   for real requires: selecting and licensing an actual quantized on-device
+   model + inference runtime sized for a phone, an actual offline STT/TTS
+   engine, and a real Android-compatible userspace/package-manager design —
+   each a multi-week effort with real testing on a device, not something to
+   assert as working without that verification.
 
 These are explicit capability boundaries, not hidden broken endpoints.
