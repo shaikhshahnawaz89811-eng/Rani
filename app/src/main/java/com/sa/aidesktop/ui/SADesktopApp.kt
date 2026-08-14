@@ -4,6 +4,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -470,7 +471,12 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){
-            msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(m.text,Modifier.padding(10.dp),fontSize=12.sp)}}}}
+            // BUG FIX (screenshot: chat bubble text almost black/unreadable on dark background):
+            // Text() previously had no explicit color, so it inherited LocalContentColor from the
+            // surrounding theme/Surface instead of a color chosen for these specific bubble
+            // backgrounds. Explicit light colors are set per bubble (user vs assistant) so both
+            // remain readable, including multiline responses, without touching the AI logic above.
+            msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(m.text,Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}}}}
         pending?.let { request ->
             Surface(Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=4.dp),RoundedCornerShape(12.dp),color=Color(0xFF171322),border=BorderStroke(1.dp,Color(0xFF70458D))){
                 Column(Modifier.padding(10.dp)){
@@ -493,7 +499,26 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             }
         }
         Row(Modifier.fillMaxWidth().padding(8.dp),verticalAlignment=Alignment.CenterVertically){
-            TextField(input,{input=it},Modifier.weight(1f),placeholder={Text("Ask Sara about your project...",fontSize=11.sp)},singleLine=true,enabled=!busy,colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF11121A),unfocusedContainerColor=Color(0xFF11121A),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
+            // BUG FIX (screenshot: AI prompt text/placeholder unreadable on dark background):
+            // this TextField relied on inherited text/placeholder/cursor colors. Explicit colors
+            // are now supplied for both focused and unfocused state, plus the typed text style,
+            // cursor, and text-selection highlight, so entry and placeholder are always visible.
+            // Single-line behavior, voice/mic/send buttons, and busy/send logic are unchanged.
+            TextField(
+                input,{input=it},Modifier.weight(1f),
+                textStyle=LocalTextStyle.current.copy(color=Color(0xFFF2F4FF),fontSize=12.sp),
+                placeholder={Text("Ask Sara about your project...",fontSize=11.sp,color=Color(0xFF8993B8))},
+                singleLine=true,enabled=!busy,
+                colors=TextFieldDefaults.colors(
+                    focusedContainerColor=Color(0xFF11121A),unfocusedContainerColor=Color(0xFF11121A),
+                    disabledContainerColor=Color(0xFF11121A),
+                    focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
+                    focusedTextColor=Color(0xFFF2F4FF),unfocusedTextColor=Color(0xFFF2F4FF),disabledTextColor=Color(0xFF7A8199),
+                    cursorColor=Color(0xFFB55CFF),
+                    focusedPlaceholderColor=Color(0xFF8993B8),unfocusedPlaceholderColor=Color(0xFF8993B8),
+                    selectionColors=TextSelectionColors(handleColor=Color(0xFFB55CFF),backgroundColor=Color(0x55B55CFF))
+                )
+            )
             IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF7FC8FF))}
             IconButton({ if (voiceState.listening) stt.stop() else micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }){Icon(if(voiceState.listening) Icons.Default.Stop else Icons.Default.Mic,"Voice input",tint=if(voiceState.listening) Color(0xFFFF7A9A) else Color(0xFF7FC8FF))}
             IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFFB55CFF))}
@@ -509,7 +534,22 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
         Row(Modifier.padding(8.dp),verticalAlignment=Alignment.CenterVertically){
             Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B))
-            TextField(input,{input=it},Modifier.weight(1f),singleLine=true,colors=TextFieldDefaults.colors(focusedContainerColor=Color.Transparent,unfocusedContainerColor=Color.Transparent,focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp))
+            // BUG FIX (screenshot: terminal typed input invisible next to "$"): the transparent
+            // TextField had a textStyle with no explicit color, so typed characters inherited
+            // whatever content color the surrounding theme provided instead of a readable
+            // terminal-style color. Text/cursor/selection colors are now explicit while keeping
+            // the transparent background, monospace font, and existing command-execution logic.
+            TextField(
+                input,{input=it},Modifier.weight(1f),singleLine=true,
+                colors=TextFieldDefaults.colors(
+                    focusedContainerColor=Color.Transparent,unfocusedContainerColor=Color.Transparent,
+                    focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
+                    focusedTextColor=Color(0xFFE0E6FF),unfocusedTextColor=Color(0xFFE0E6FF),
+                    cursorColor=Color(0xFF7AFF9B),
+                    selectionColors=TextSelectionColors(handleColor=Color(0xFF7AFF9B),backgroundColor=Color(0x557AFF9B))
+                ),
+                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF))
+            )
             IconButton({
                 val r=terminal.execute(input); input=""
                 if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}"); out.add("user@sa-desktop:~/MyProject$") }
