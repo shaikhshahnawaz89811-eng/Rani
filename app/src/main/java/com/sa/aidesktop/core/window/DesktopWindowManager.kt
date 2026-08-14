@@ -148,8 +148,6 @@ class DesktopWindowManager : WindowManager {
         workspaceWidth: Float,
         workspaceHeight: Float
     ) {
-        resize(id, edge, dx, dy)
-
         val maxWidth = workspaceWidth.coerceAtLeast(1f)
         val maxHeight = workspaceHeight.coerceAtLeast(1f)
 
@@ -157,27 +155,60 @@ class DesktopWindowManager : WindowManager {
             if (w.id != id || w.state != WindowState.NORMAL) {
                 w
             } else {
-                val width = w.width.coerceIn(
-                    260f.coerceAtMost(maxWidth),
-                    maxWidth
-                )
+                val minW = 260f.coerceAtMost(maxWidth)
+                val minH = 180f.coerceAtMost(maxHeight)
 
-                val height = w.height.coerceIn(
-                    180f.coerceAtMost(maxHeight),
-                    maxHeight
-                )
+                val leftEdge = edge == ResizeEdge.LEFT ||
+                    edge == ResizeEdge.TOP_LEFT ||
+                    edge == ResizeEdge.BOTTOM_LEFT
 
-                val maxX = (maxWidth - width).coerceAtLeast(0f)
-                val maxY = (maxHeight - height).coerceAtLeast(0f)
+                val rightEdge = edge == ResizeEdge.RIGHT ||
+                    edge == ResizeEdge.TOP_RIGHT ||
+                    edge == ResizeEdge.BOTTOM_RIGHT
 
-                val x = w.x.coerceIn(4f, maxX.coerceAtLeast(4f))
-                val y = w.y.coerceIn(4f, maxY.coerceAtLeast(4f))
+                val topEdge = edge == ResizeEdge.TOP ||
+                    edge == ResizeEdge.TOP_LEFT ||
+                    edge == ResizeEdge.TOP_RIGHT
+
+                val bottomEdge = edge == ResizeEdge.BOTTOM ||
+                    edge == ResizeEdge.BOTTOM_LEFT ||
+                    edge == ResizeEdge.BOTTOM_RIGHT
+
+                var newWidth = when {
+                    leftEdge -> w.width - dx
+                    rightEdge -> w.width + dx
+                    else -> w.width
+                }
+
+                var newHeight = when {
+                    topEdge -> w.height - dy
+                    bottomEdge -> w.height + dy
+                    else -> w.height
+                }
+
+                newWidth = newWidth.coerceIn(minW, maxWidth)
+                newHeight = newHeight.coerceIn(minH, maxHeight)
+
+                var newX = if (leftEdge) {
+                    w.x + (w.width - newWidth)
+                } else {
+                    w.x
+                }
+
+                var newY = if (topEdge) {
+                    w.y + (w.height - newHeight)
+                } else {
+                    w.y
+                }
+
+                newX = newX.coerceIn(4f, (maxWidth - newWidth - 4f).coerceAtLeast(4f))
+                newY = newY.coerceIn(4f, (maxHeight - newHeight - 4f).coerceAtLeast(4f))
 
                 w.copy(
-                    x = x,
-                    y = y,
-                    width = width,
-                    height = height
+                    x = newX,
+                    y = newY,
+                    width = newWidth,
+                    height = newHeight
                 )
             }
         }
