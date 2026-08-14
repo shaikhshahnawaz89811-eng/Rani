@@ -21,9 +21,14 @@ class EmbeddedTerminalService(workspace:File,private val backend:ShellBackend=Em
     override fun state()=TerminalSessionState(cwd,history.toList(),running,lastExit)
 }
 class SafeTerminalService:TerminalService{
-    private val delegate=EmbeddedTerminalService(File(System.getProperty("java.io.tmpdir"),"sa-workspace"),object:ShellBackend{
+    private val root=File(System.getProperty("java.io.tmpdir"),"sa-workspace")
+    private val delegate=EmbeddedTerminalService(root,object:ShellBackend{
         override fun execute(command:String,workingDirectory:String,timeoutMs:Long)=when{command=="pwd"->TerminalResult("/workspace/MyProject",0);command=="ls"->TerminalResult("src  tests  assets  README.md  requirements.txt",0);command.startsWith("echo ")->TerminalResult(command.removePrefix("echo "),0);command=="git status"->TerminalResult("On branch main\nworking tree clean",0);else->TerminalResult("Command blocked by safe embedded shell policy: $command",126)}
         override fun cancel(){}
     })
-    override fun execute(command:String)=delegate.execute(command);override fun cancel()=delegate.cancel();override fun state()=delegate.state()
+    init { File(root,"src").mkdirs() }
+
+    override fun execute(command:String)=delegate.execute(command)
+    override fun cancel()=delegate.cancel()
+    override fun state()=delegate.state()
 }
