@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
@@ -498,7 +499,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         Row(Modifier.fillMaxWidth().height(34.dp),verticalAlignment=Alignment.CenterVertically){
             IconButton(onClick={currentPath=currentPath.substringBeforeLast('/',"");refresh() },enabled=currentPath.isNotEmpty(),modifier=Modifier.size(30.dp)){Icon(Icons.Default.ArrowBack,"Back")}
             Text("MyProject/${currentPath}".trimEnd('/'),Modifier.weight(1f),fontSize=11.sp)
-            IconButton(onClick={refresh},modifier=Modifier.size(30.dp)){Icon(Icons.Default.Refresh,"Refresh")}
+            IconButton(onClick={refresh()},modifier=Modifier.size(30.dp)){Icon(Icons.Default.Refresh,"Refresh")}
         }
         Row(Modifier.fillMaxWidth().padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
             TextField(query,{query=it},Modifier.weight(1f),singleLine=true,placeholder={Text("Search files...",fontSize=10.sp)},colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF11131C),unfocusedContainerColor=Color(0xFF11131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
