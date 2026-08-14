@@ -330,12 +330,20 @@ class AndroidBrowserService(
         val file = resolveUploadFile(filePath)
             ?: return BrowserResult.Failure("File is outside the allowed workspace or does not exist: $filePath")
         if (!file.isFile || !file.canRead()) return BrowserResult.Failure("File does not exist or is not readable: $filePath")
-        return onMain(windowId) {
+        val callbackResult = kotlinx.coroutines.CompletableDeferred<BrowserResult<String>>()
+        val registered = onMain(windowId) {
             val view = views[windowId] ?: return@onMain BrowserResult.Failure("Browser window is not ready.")
-            val callbackResult = kotlinx.coroutines.CompletableDeferred<BrowserResult<String>>()
             pendingUploads[windowId] = PendingUpload(ref, file) { uris ->
-                if (uris.isNullOrEmpty()) callbackResult.complete(BrowserResult.Failure("WebView rejected the selected file."))
-                else callbackResult.complete(BrowserResult.Success("Real file selected into the WebView file input: ${file.name}. The page/server upload is not claimed complete; that depends on the page's own upload flow."))
+                if (uris.isNullOrEmpty()) {
+                    callbackResult.complete(BrowserResult.Failure("WebView rejected the selected file."))
+                } else {
+                    callbackResult.complete(
+                        BrowserResult.Success(
+                            "Real file selected into the WebView file input: ${file.name}. " +
+                                "The page/server upload is not claimed complete; that depends on the page's own upload flow."
+                        )
+                    )
+                }
             }
             val js = """
                 (function(){
@@ -346,17 +354,27 @@ class AndroidBrowserService(
                 })()
             """.trimIndent()
             view.evaluateJavascript(js) { raw ->
-                val parsed = runCatching { JSONObject(raw.trim('"').replace("\\\"","\"")) }.getOrNull()
+                val parsed = runCatching { JSONObject(raw.trim('"').replace("\\\"", "\"")) }.getOrNull()
                 if (parsed?.optBoolean("ok") != true) {
                     pendingUploads.remove(windowId)
-                    callbackResult.complete(BrowserResult.Failure(parsed?.optString("reason") ?: "File input could not be activated."))
+                    callbackResult.complete(
+                        BrowserResult.Failure(
+                            parsed?.optString("reason") ?: "File input could not be activated."
+                        )
+                    )
                 }
             }
-            callbackResult.await()
+            BrowserResult.Success(Unit)
         }
+        if (registered is BrowserResult.Failure) return registered
+        return callbackResult.await()
     }
 
-    suspend fun currentUrl(windowId: String): String = onMain(windowId) { views[windowId]?.url.orEmpty() }
+    suspend fun currentUrl(windowId: String): String =
+        when (val result = onMain(windowId) { BrowserResult.Success(views[windowId]?.url.orEmpty()) }) {
+            is BrowserResult.Success -> result.value
+            is BrowserResult.Failure -> ""
+        }
 
     private suspend fun actionResult(windowId: String, js: String, action: String): BrowserResult<String> {
         val result = evaluate(windowId, js)
@@ -440,18 +458,44 @@ class AndroidBrowserService(
         })()
     """.trimIndent()
 
-    private fun parsePage(raw: String, limits: BrowserLimits): BrowserResult<BrowserPage> = runCatching {
-        val o = JSONObject(raw)
-        fun arr(key:String): List<BrowserElement> {
-            val a=o.optJSONArray(key)?:JSONArray()
-            return (0 until a.length()).map { i ->
-                val e=a.getJSONObject(i)
-                BrowserElement(e.optString("ref"),e.optInt("index"),e.optString("role"),e.optString("text"),e.optString("ariaLabel"),e.optString("inputType"),if(e.isNull("value"))null else e.optString("value"),e.optBoolean("enabled"),e.optBoolean("visible"),e.optBoolean("interactable"),if(e.has("required"))e.optBoolean("required") else null)
+    private fun parsePage(raw: String, limits: BrowserLimits): BrowserResult<BrowserPage> {
+        return try {
+            val o = JSONObject(raw)
+            fun arr(key: String): List<BrowserElement> {
+                val a = o.optJSONArray(key) ?: JSONArray()
+                return (0 until a.length()).map { index ->
+                    val e = a.getJSONObject(index)
+                    BrowserElement(
+                        e.optString("ref"),
+                        e.optInt("index"),
+                        e.optString("role"),
+                        e.optString("text"),
+                        e.optString("ariaLabel"),
+                        e.optString("inputType"),
+                        if (e.isNull("value")) null else e.optString("value"),
+                        e.optBoolean("enabled"),
+                        e.optBoolean("visible"),
+                        e.optBoolean("interactable"),
+                        if (e.has("required")) e.optBoolean("required") else null
+                    )
+                }
             }
+            BrowserResult.Success(
+                BrowserPage(
+                    o.optString("url"),
+                    o.optString("title"),
+                    o.optString("visibleText"),
+                    arr("headings"),
+                    arr("elements"),
+                    arr("links"),
+                    arr("forms"),
+                    o.optBoolean("truncated")
+                )
+            )
+        } catch (t: Throwable) {
+            BrowserResult.Failure("Could not parse page inspection: ${t.message ?: t.javaClass.simpleName}")
         }
-        BrowserPage(o.optString("url"),o.optString("title"),o.optString("visibleText"),arr("headings"),arr("elements"),arr("links"),arr("forms"),o.optBoolean("truncated"))
-    }.fold({ BrowserResult.Failure("Could not parse page inspection: ${it.message}") }, { BrowserResult.Success(it) })
-
+    }
     private fun enqueueDownload(windowId:String,url:String,userAgent:String?,contentDisposition:String?,mimeType:String?) {
         val req=DownloadManager.Request(Uri.parse(url))
             .setTitle(URL(url).path.substringAfterLast('/').ifBlank{"browser-download"})
@@ -469,8 +513,8 @@ class AndroidBrowserService(
         val raw = File(path)
         val candidate = if (raw.isAbsolute) raw else workspaceRoot?.resolve(path) ?: return null
         val canonical = runCatching { candidate.canonicalFile }.getOrNull() ?: return null
-        if (workspaceRoot == null) return if (canonical.isFile && canonical.canRead()) canonical else null
-        val root = runCatching { workspaceRoot.canonicalFile }.getOrNull() ?: return null
+        val rootDirectory = workspaceRoot ?: return if (canonical.isFile && canonical.canRead()) canonical else null
+        val root = runCatching { rootDirectory.canonicalFile }.getOrNull() ?: return null
         if (canonical.path != root.path && !canonical.path.startsWith(root.path + File.separator)) return null
         return canonical
     }

@@ -182,8 +182,8 @@ class GitHubCreateRepositoryTool(private val api: GitHubApiClient): AITool {
 
 private inline fun <T,R> com.sa.aidesktop.core.git.GitResult<T>.toAi(
     action: String,
-    transform: (T) -> R,
-    changed: Boolean = false
+    changed: Boolean = false,
+    transform: (T) -> R
 ): AIResult<ToolResult> = when (this) {
     is com.sa.aidesktop.core.git.GitResult.Success -> AIResult.Success(ToolResult("$action success:\n${transform(value)}".take(32_000), changed = changed))
     is com.sa.aidesktop.core.git.GitResult.Failure -> AIResult.Failure(AIError.Execution("$action failed: ${error.message()}"))
@@ -191,8 +191,8 @@ private inline fun <T,R> com.sa.aidesktop.core.git.GitResult<T>.toAi(
 
 private inline fun <T,R> GitHubResult<T>.toAi(
     action: String,
-    transform: (T) -> R,
-    changed: Boolean = false
+    changed: Boolean = false,
+    transform: (T) -> R
 ): AIResult<ToolResult> = when (this) {
     is GitHubResult.Success -> AIResult.Success(ToolResult("$action success:\n${transform(value)}".take(32_000), changed = changed))
     is GitHubResult.Failure -> AIResult.Failure(AIError.Execution("$action failed: $message"))

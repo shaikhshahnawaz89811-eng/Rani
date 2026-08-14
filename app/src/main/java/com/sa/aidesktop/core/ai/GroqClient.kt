@@ -177,10 +177,10 @@ class GroqClient(
         if (array == null) return emptyList()
         val result = mutableListOf<GroqToolCall>()
         for (i in 0 until array.length()) {
-            val call = array.optJSONObject(i) ?: continue
-            val function = call.optJSONObject("function") ?: continue
-            val name = function.optString("name", "")
-            if (name.isBlank()) continue
+            val call = array.optJSONObject(i)
+            val function = call?.optJSONObject("function")
+            val name = function?.optString("name", "").orEmpty()
+            if (call == null || function == null || name.isBlank()) continue
             val id = call.optString("id", "call_$i")
             val argumentsRaw = function.optString("arguments", "{}")
             val arguments = try {

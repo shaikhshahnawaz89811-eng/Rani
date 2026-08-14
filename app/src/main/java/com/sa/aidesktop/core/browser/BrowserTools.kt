@@ -9,9 +9,16 @@ import com.sa.aidesktop.core.window.WindowType
 import kotlinx.coroutines.delay
 import java.io.File
 
-private fun BrowserResult<String>.toAi(action: String): AIResult<ToolResult> = when (this) {
-    is BrowserResult.Success -> AIResult.Success(ToolResult("$action succeeded: ${value.take(18_000)}"))
-    is BrowserResult.Failure -> AIResult.Failure(com.sa.aidesktop.core.ai.AIError.Execution("$action failed: $message"))
+private fun <T> BrowserResult<T>.toAi(action: String): AIResult<ToolResult> = when (this) {
+    is BrowserResult.Success -> {
+        val output = when (val result = value) {
+            is String -> result.take(18_000)
+            else -> "Operation completed successfully."
+        }
+        AIResult.Success(ToolResult("$action succeeded: $output"))
+    }
+    is BrowserResult.Failure ->
+        AIResult.Failure(com.sa.aidesktop.core.ai.AIError.Execution("$action failed: $message"))
 }
 
 private fun BrowserResult<BrowserPage>.toInspectAi(): AIResult<ToolResult> = when (this) {
@@ -60,12 +67,12 @@ abstract class BrowserTool(
 
     protected suspend fun ensureWindow(input: Map<String, String>): String? {
         windowId(input)?.let { return it }
-        return windowManager.openNew(WindowType.BROWSER).also {
-            repeat(20) {
-                if (browser.states.value.containsKey(it)) return it
-                delay(50)
-            }
+        val newWindowId = windowManager.openNew(WindowType.BROWSER)
+        repeat(20) {
+            if (browser.states.value.containsKey(newWindowId)) return newWindowId
+            delay(50)
         }
+        return newWindowId
     }
 }
 
@@ -148,12 +155,13 @@ class BrowserElementTool(
     override suspend fun execute(input: Map<String, String>): AIResult<ToolResult> {
         val id = windowId(input) ?: return AIResult.Failure(com.sa.aidesktop.core.ai.AIError.Execution("No browser window is open."))
         val ref = input["ref"].orEmpty()
+        val checked = input["checked"]?.toBooleanStrictOrNull()
         val r = when(action) {
             "click" -> browser.click(id, ref)
             "type" -> browser.type(id, ref, input["text"].orEmpty())
             "clear" -> browser.clear(id, ref)
             "select" -> browser.select(id, ref, input["value"].orEmpty())
-            "check" -> browser.check(id, ref, input["checked"].toBooleanStrictOrNull() ?: return AIResult.Failure(com.sa.aidesktop.core.ai.AIError.InvalidRequest("checked must be true or false")))
+            "check" -> browser.check(id, ref, checked ?: return AIResult.Failure(com.sa.aidesktop.core.ai.AIError.InvalidRequest("checked must be true or false")))
             "focus" -> browser.focus(id, ref)
             "scroll" -> browser.scroll(id, input["direction"].orEmpty(), input["amount"]?.toIntOrNull() ?: 800)
             "upload" -> browser.upload(id, ref, input["file_path"].orEmpty())
