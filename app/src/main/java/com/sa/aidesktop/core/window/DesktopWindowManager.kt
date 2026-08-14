@@ -157,10 +157,21 @@ class DesktopWindowManager : WindowManager {
             if (w.id != id || w.state != WindowState.NORMAL) {
                 w
             } else {
-                val width = w.width.coerceIn(260f.coerceAtMost(maxWidth), maxWidth)
-                val height = w.height.coerceIn(180f.coerceAtMost(maxHeight), maxHeight)
-                val x = w.x.coerceIn(4f, (maxWidth - width - 4f).coerceAtLeast(4f))
-                val y = w.y.coerceIn(4f, (maxHeight - height - 4f).coerceAtLeast(4f))
+                val width = w.width.coerceIn(
+                    260f.coerceAtMost(maxWidth),
+                    maxWidth
+                )
+
+                val height = w.height.coerceIn(
+                    180f.coerceAtMost(maxHeight),
+                    maxHeight
+                )
+
+                val maxX = (maxWidth - width).coerceAtLeast(0f)
+                val maxY = (maxHeight - height).coerceAtLeast(0f)
+
+                val x = w.x.coerceIn(4f, maxX.coerceAtLeast(4f))
+                val y = w.y.coerceIn(4f, maxY.coerceAtLeast(4f))
 
                 w.copy(
                     x = x,
