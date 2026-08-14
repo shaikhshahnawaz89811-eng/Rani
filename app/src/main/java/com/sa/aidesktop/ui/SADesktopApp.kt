@@ -327,8 +327,12 @@ private val RESIZE_HANDLE_INSET = 12.dp
     val initialFile = remember(files) { files.listDirectory("src").value.orEmpty().firstOrNull { it.kind != FileKind.FOLDER }?.path }
     var tabs by remember(initialFile) { mutableStateOf(initialFile?.let { listOf(it) } ?: emptyList()) }
     var selectedTab by remember(initialFile) { mutableStateOf(initialFile.orEmpty()) }
-    var buffers by remember(initialFile) { mutableStateOf(initialFile?.let { mapOf(it to files.read(it).value.orEmpty()) } ?: emptyMap()) }
-    var savedBuffers by remember { mutableStateOf(buffers) }
+    var buffers: Map<String, String> by remember(initialFile) {
+        mutableStateOf<Map<String, String>>(
+            initialFile?.let { path -> mapOf(path to files.read(path).value.orEmpty()) } ?: emptyMap()
+        )
+    }
+    var savedBuffers: Map<String, String> by remember { mutableStateOf(buffers) }
 
     fun openFile(path: String) {
         if (!tabs.contains(path)) tabs = tabs + path
@@ -591,6 +595,16 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         AIMessage("Hello! I'm ${profile.name}\n${if(settingsStore.hasApiKey()) "Groq is configured — I'll use it, and fall back to the real offline model is unavailable only if a request fails." else "No Groq key is configured. I'll use the local GGUF model if one is configured; otherwise I'll report that offline AI is unavailable."}",false,"Now"),
         AIMessage("Main project context ko need ke hisaab se use karungi. File changes aur sensitive actions approval ke bina apply nahi honge.",false,"Now")
     )}
+    fun taskStatusMessage(record: CodingTaskStateRecord): String = buildString {
+        append("Task ${record.taskId}: ${record.state}")
+        record.waitingReason?.takeIf { it.isNotBlank() }?.let { append("\\nWaiting: $it") }
+        record.unresolvedErrors.takeIf { it.isNotEmpty() }?.let {
+            append("\\nErrors: ")
+            append(it.take(5).joinToString(" | "))
+        }
+        if (record.iteration > 0) append("\\nIteration: ${record.iteration}")
+    }
+
     fun send(){
         val p=input.trim(); if(p.isBlank() || busy) return
         msgs.add(AIMessage(p,true,"Now")); input=""; busy=true

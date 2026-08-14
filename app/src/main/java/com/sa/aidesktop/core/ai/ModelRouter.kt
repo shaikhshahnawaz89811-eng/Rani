@@ -46,7 +46,7 @@ class ModelRouter(
         if (request.prompt.isBlank()) return AIResult.Failure(AIError.InvalidRequest("Message cannot be empty."))
 
         if (!hasApiKey()) {
-            status = status.copy(lastTier = if (offline is LocalModelEngine) RouterTier.OFFLINE_LOCAL else RouterTier.OFFLINE_LOCAL_UNAVAILABLE, lastError = "No Groq API key configured.")
+            status = status.copy(lastTier = if (offline is LocalLlamaEngine) RouterTier.OFFLINE_LOCAL else RouterTier.OFFLINE_LOCAL_UNAVAILABLE, lastError = "No Groq API key configured.")
             return offline.chat(request)
         }
 
@@ -86,7 +86,7 @@ class ModelRouter(
                 }
                 is GroqResult.Failure -> {
                     status = status.copy(
-                        lastTier = if (offline is LocalModelEngine) RouterTier.OFFLINE_LOCAL else RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
+                        lastTier = if (offline is LocalLlamaEngine) RouterTier.OFFLINE_LOCAL else RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
                         lastError = describe(result.error),
                         consecutiveOnlineFailures = status.consecutiveOnlineFailures + 1
                     )

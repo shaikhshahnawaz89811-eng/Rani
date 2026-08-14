@@ -12,12 +12,24 @@ abstract class AIWebTool(protected val service:AIWebService):AITool {
 class AIWebDetectTool(s:AIWebService):AIWebTool(s){
     override val id="ai_web.detect"; override val description="Inspect the live page and detect an AI-web composer, send/upload controls, login and generation state."; override val risk=ToolRisk.READ_ONLY
     override val parameterHints=mapOf("window_id" to "Browser window id")
-    override suspend fun execute(input:Map<String,String>)=service.detect(id(input)?:return AIResult.Failure(AIError.InvalidRequest("window_id is required"))).let{r-> when(r){is BrowserResult.Failure->AIResult.Failure(AIError.Execution(r.message));is BrowserResult.Success->AIResult.Success(ToolResult("STATE=${r.value.state}\nURL=${r.value.page.url}\nTITLE=${r.value.page.title}\nCOMPOSER=${r.value.composer?.ref}\nSEND=${r.value.sendControl?.ref}\nUPLOAD=${r.value.uploadControl?.ref}\nRESPONSE=${r.value.responseText.take(8_000)}"))}}
+    override suspend fun execute(input:Map<String,String>): AIResult<ToolResult> {
+        val windowId = id(input) ?: return AIResult.Failure(AIError.InvalidRequest("window_id is required"))
+        return when (val r = service.detect(windowId)) {
+            is BrowserResult.Failure -> AIResult.Failure(AIError.Execution(r.message))
+            is BrowserResult.Success -> AIResult.Success(ToolResult("STATE=${r.value.state}\\nURL=${r.value.page.url}\\nTITLE=${r.value.page.title}\\nCOMPOSER=${r.value.composer?.ref}\\nSEND=${r.value.sendControl?.ref}\\nUPLOAD=${r.value.uploadControl?.ref}\\nRESPONSE=${r.value.responseText.take(8_000)}"))
+        }
+    }
 }
 class AIWebInspectTool(s:AIWebService):AIWebTool(s){
     override val id="ai_web.inspect"; override val description="Inspect the real current AI website page without performing an action."; override val risk=ToolRisk.READ_ONLY
     override val parameterHints=mapOf("window_id" to "Browser window id")
-    override suspend fun execute(input:Map<String,String>)=service.inspect(id(input)?:return AIResult.Failure(AIError.InvalidRequest("window_id is required"))).let{r->when(r){is BrowserResult.Failure->AIResult.Failure(AIError.Execution(r.message));is BrowserResult.Success->AIResult.Success(ToolResult("STATE=${r.value.state}\nCOMPOSER=${r.value.composer?.ref}\nSEND=${r.value.sendControl?.ref}\nUPLOAD=${r.value.uploadControl?.ref}\nURL=${r.value.page.url}\nTITLE=${r.value.page.title}\nTEXT=${r.value.page.visibleText.take(12_000)}"))}}}
+    override suspend fun execute(input:Map<String,String>): AIResult<ToolResult> {
+        val windowId = id(input) ?: return AIResult.Failure(AIError.InvalidRequest("window_id is required"))
+        return when (val r = service.inspect(windowId)) {
+            is BrowserResult.Failure -> AIResult.Failure(AIError.Execution(r.message))
+            is BrowserResult.Success -> AIResult.Success(ToolResult("STATE=${r.value.state}\\nCOMPOSER=${r.value.composer?.ref}\\nSEND=${r.value.sendControl?.ref}\\nUPLOAD=${r.value.uploadControl?.ref}\\nURL=${r.value.page.url}\\nTITLE=${r.value.page.title}\\nTEXT=${r.value.page.visibleText.take(12_000)}"))
+        }
+    }
 }
 class AIWebTypeTool(s:AIWebService):AIWebTool(s){
     override val id="ai_web.type_message"; override val description="Type a real message into the currently inspected AI website composer."; override val risk=ToolRisk.WRITE
