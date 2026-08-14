@@ -224,9 +224,14 @@ private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): Wi
     },verticalAlignment=Alignment.CenterVertically){
         Icon(Icons.Default.DragHandle,null,Modifier.size(16.dp),tint=if(w.focused) Color(0xFF8F9FC8) else Color(0xFF59627A))
         Text(w.title,Modifier.weight(1f).padding(start=6.dp),fontSize=12.sp,color=Color(0xFFE5E9F7),maxLines=1)
-        IconButton({manager.minimize(w.id)},Modifier.size(28.dp)){Icon(Icons.Default.Remove,null,Modifier.size(15.dp))}
-        IconButton({if(w.state==WindowState.MAXIMIZED)manager.restore(w.id)else manager.maximize(w.id)},Modifier.size(28.dp)){Icon(if(w.state==WindowState.MAXIMIZED)Icons.Default.FullscreenExit else Icons.Default.CropSquare,null,Modifier.size(14.dp))}
-        IconButton({manager.close(w.id)},Modifier.size(28.dp)){Icon(Icons.Default.Close,null,Modifier.size(15.dp))}
+        // BUG FIX (screenshot: minimize/maximize/close hard to see): these IconButtons had no
+        // explicit tint, so on some Compose/theme combinations they inherited a low-contrast
+        // content color and nearly disappeared against the dark title bar. Every control below
+        // now has an explicit, high-contrast tint plus a visible circular hit-target background,
+        // matching rule 4C (visible, touch-friendly, always reachable window controls).
+        IconButton({manager.minimize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x14FFFFFF))){Icon(Icons.Default.Remove,"Minimize",Modifier.size(16.dp),tint=Color(0xFFE7ECFB))}
+        IconButton({if(w.state==WindowState.MAXIMIZED)manager.restore(w.id)else manager.maximize(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x14FFFFFF))){Icon(if(w.state==WindowState.MAXIMIZED)Icons.Default.FullscreenExit else Icons.Default.CropSquare,"Maximize",Modifier.size(14.dp),tint=Color(0xFFE7ECFB))}
+        IconButton({manager.close(w.id)},Modifier.size(32.dp).clip(RoundedCornerShape(7.dp)).background(Color(0x26FF5C7A))){Icon(Icons.Default.Close,"Close",Modifier.size(16.dp),tint=Color(0xFFFFD3DC))}
     }
 }
 
@@ -255,35 +260,52 @@ private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): Wi
         if (selectedTab == path) selectedTab = tabs.first()
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().weight(1f)) {
-            Column(Modifier.width(185.dp).fillMaxHeight().background(Color(0xFF0B0C13)).verticalScroll(rememberScrollState()).padding(8.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("EXPLORER", fontSize=11.sp, color=Color(0xFF98A5C8), modifier=Modifier.weight(1f))
-                    IconButton(onClick={ tree = files.projectTree() }, modifier=Modifier.size(26.dp)) { Icon(Icons.Default.Refresh, "Refresh", tint=Color(0xFF9BB8FF), modifier=Modifier.size(15.dp)) }
+    // BUG FIX (screenshot 4A: code cut off in the mini window): the Explorer panel used a fixed
+    // 185.dp width regardless of how narrow the window was. On a small window that left almost
+    // no horizontal room for the editor, so the TextField wrapped every line (even mid-word, e.g.
+    // "import" split into "impo"/"rt") instead of showing real code. The panel now measures the
+    // real available width (BoxWithConstraints, not a hardcoded phone size) and collapses into a
+    // toggleable icon rail below a width threshold, per rule 22 ("Explorer may collapse into a
+    // real toggle" with "a real way to access collapsed panels"), so the editor always gets the
+    // majority of the window's width instead of being starved by a fixed sidebar.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val narrow = maxWidth < 480.dp
+        var explorerOpen by remember(narrow) { mutableStateOf(!narrow) }
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().weight(1f)) {
+                if (!narrow || explorerOpen) {
+                    Column(Modifier.width(if (narrow) 220.dp else 185.dp).fillMaxHeight().background(Color(0xFF0B0C13)).verticalScroll(rememberScrollState()).padding(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("EXPLORER", fontSize=11.sp, color=Color(0xFF98A5C8), modifier=Modifier.weight(1f))
+                            if (narrow) IconButton(onClick={ explorerOpen=false }, modifier=Modifier.size(26.dp)) { Icon(Icons.Default.ChevronLeft, "Collapse explorer", tint=Color(0xFF9BB8FF), modifier=Modifier.size(16.dp)) }
+                            IconButton(onClick={ tree = files.projectTree() }, modifier=Modifier.size(26.dp)) { Icon(Icons.Default.Refresh, "Refresh", tint=Color(0xFF9BB8FF), modifier=Modifier.size(15.dp)) }
+                        }
+                        Text("MyProject", fontSize=10.sp, color=Color(0xFF6F7C9F), modifier=Modifier.padding(vertical=5.dp))
+                        Tree(tree,0){ path -> openFile(path); if(narrow) explorerOpen=false }
+                    }
+                } else {
+                    IconButton(onClick={ explorerOpen=true }, modifier=Modifier.fillMaxHeight().width(34.dp).background(Color(0xFF0B0C13))) { Icon(Icons.Default.ChevronRight, "Open explorer", tint=Color(0xFF9BB8FF)) }
                 }
-                Text("MyProject", fontSize=10.sp, color=Color(0xFF6F7C9F), modifier=Modifier.padding(vertical=5.dp))
-                Tree(tree,0){ path -> openFile(path) }
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    EditorTabs(tabs, selectedTab, buffers, savedBuffers, onSelect={selectedTab=it}, onClose={closeTab(it)})
+                    val current = buffers[selectedTab].orEmpty()
+                    CodeEditor(
+                        code=current,
+                        filePath=selectedTab,
+                        onChange={ text -> buffers = buffers + (selectedTab to text) },
+                        onSave={ saveFile(selectedTab) }
+                    )
+                }
             }
-            Column(Modifier.weight(1f).fillMaxHeight()) {
-                EditorTabs(tabs, selectedTab, buffers, savedBuffers, onSelect={selectedTab=it}, onClose={closeTab(it)})
-                val current = buffers[selectedTab].orEmpty()
-                CodeEditor(
-                    code=current,
-                    filePath=selectedTab,
-                    onChange={ text -> buffers = buffers + (selectedTab to text) },
-                    onSave={ saveFile(selectedTab) }
-                )
+            val current = buffers[selectedTab].orEmpty()
+            val dirty = current != savedBuffers[selectedTab]
+            Row(Modifier.fillMaxWidth().height(30.dp).background(Color(0xFF0B0C13)).padding(horizontal=10.dp),verticalAlignment=Alignment.CenterVertically){
+                Text("Ln 1, Col 1",fontSize=9.sp,color=Color(0xFFAAB4D4))
+                Spacer(Modifier.weight(1f))
+                Text(if(dirty) "Unsaved changes" else "Saved",fontSize=9.sp,color=if(dirty) Color(0xFFFFB45B) else Color(0xFF7FE0A2))
+                Spacer(Modifier.width(12.dp))
+                Text("UTF-8   Kotlin/Compose editor core",fontSize=9.sp,color=Color(0xFF8F9DBA))
             }
-        }
-        val current = buffers[selectedTab].orEmpty()
-        val dirty = current != savedBuffers[selectedTab]
-        Row(Modifier.fillMaxWidth().height(30.dp).background(Color(0xFF0B0C13)).padding(horizontal=10.dp),verticalAlignment=Alignment.CenterVertically){
-            Text("Ln 1, Col 1",fontSize=9.sp)
-            Spacer(Modifier.weight(1f))
-            Text(if(dirty) "Unsaved changes" else "Saved",fontSize=9.sp,color=if(dirty) Color(0xFFFFB45B) else Color(0xFF7FE0A2))
-            Spacer(Modifier.width(12.dp))
-            Text("UTF-8   Kotlin/Compose editor core",fontSize=9.sp,color=Color(0xFF8F9DBA))
         }
     }
 }
@@ -380,11 +402,20 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             Text("Go to line",fontSize=10.sp,color=Color(0xFF9AA7C8));Spacer(Modifier.width(8.dp));TextField(gotoLine,{gotoLine=it.filter(Char::isDigit)},Modifier.width(90.dp),singleLine=true,colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF151724),unfocusedContainerColor=Color(0xFF151724),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),textStyle=LocalTextStyle.current.copy(fontSize=10.sp));
             TextButton(onClick={val n=gotoLine.toIntOrNull()?.coerceIn(1,lines.size) ?: 1;scope.launch { scroll.animateScrollTo(((n-1)*18).coerceAtLeast(0)) };showGoto=false}){Text("Jump",fontSize=9.sp)}
         }
+        // BUG FIX (screenshot 4A): the TextField had no horizontal scroll, so in a narrow window
+        // it soft-wrapped every line - even mid-word ("import" rendered as "impo" / "rt" on two
+        // lines) - which is exactly the "clipped/destroyed formatting" bug called out in the
+        // report. Wrapping the field in its own horizontalScroll container and sizing it to its
+        // intrinsic (unwrapped) content width means long lines now scroll sideways instead of
+        // breaking, while the outer Row still scrolls vertically in sync with the line numbers.
+        val hScroll = rememberScrollState()
         Row(Modifier.fillMaxSize().weight(1f)){
-            Column(Modifier.width(48.dp).verticalScroll(rememberScrollState()).padding(top=9.dp),horizontalAlignment=Alignment.End){lines.indices.forEach{Text("${it+1}",fontSize=10.sp,color=if(it+1==1)Color(0xFFB5C5FF)else Color(0xFF525A73),modifier=Modifier.padding(end=8.dp))}}
-            TextField(value=code,onValueChange={change(it)},Modifier.fillMaxSize().verticalScroll(scroll),visualTransformation=object:VisualTransformation{
-                override fun filter(text:AnnotatedString)=TransformedText(highlightCode(text.text),OffsetMapping.Identity)
-            },textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=12.sp,color=Color(0xFFDDE5FF)),colors=TextFieldDefaults.colors(focusedContainerColor=Color.Transparent,unfocusedContainerColor=Color.Transparent,focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),singleLine=false)
+            Column(Modifier.width(48.dp).verticalScroll(scroll).padding(top=9.dp),horizontalAlignment=Alignment.End){lines.indices.forEach{Text("${it+1}",fontSize=10.sp,color=if(it+1==1)Color(0xFFB5C5FF)else Color(0xFF525A73),modifier=Modifier.padding(end=8.dp))}}
+            Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(scroll)) {
+                TextField(value=code,onValueChange={change(it)},Modifier,visualTransformation=object:VisualTransformation{
+                    override fun filter(text:AnnotatedString)=TransformedText(highlightCode(text.text),OffsetMapping.Identity)
+                },textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=12.sp,color=Color(0xFFDDE5FF)),colors=TextFieldDefaults.colors(focusedContainerColor=Color.Transparent,unfocusedContainerColor=Color.Transparent,focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),singleLine=false)
+            }
         }
     }
 }
