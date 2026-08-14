@@ -7,11 +7,15 @@ plugins {
 
 kotlin {
     jvmToolchain(21)
-    // GroqClientTest uses the JDK's built-in com.sun.net.httpserver (jdk.httpserver module) to
-    // spin up a real loopback HTTP server. With a JDK 21 toolchain that module is not part of the
-    // default module set resolved for classpath compilation, so it must be added explicitly or
-    // the compiler reports "Unresolved reference 'sun'". This only affects compilation visibility
-    // of that JDK module — no production code or tests are changed.
+}
+
+// GroqClientTest uses the JDK's built-in com.sun.net.httpserver (jdk.httpserver module) to spin
+// up a real loopback HTTP server. That module is not part of the default module set the Kotlin
+// compiler resolves for classpath-style compilation, so "com.sun.net.httpserver.*" is reported as
+// unresolved unless the module is added explicitly. Configuring this on every KotlinCompile task
+// (not just the top-level kotlin{} block) makes sure it reaches compileDebugUnitTestKotlin, the
+// task that actually fails. This only widens compiler module visibility — no code is changed.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions {
         freeCompilerArgs.add("-Xadd-modules=jdk.httpserver")
     }
