@@ -7,6 +7,14 @@ plugins {
 
 kotlin {
     jvmToolchain(21)
+    // GroqClientTest uses the JDK's built-in com.sun.net.httpserver (jdk.httpserver module) to
+    // spin up a real loopback HTTP server. With a JDK 21 toolchain that module is not part of the
+    // default module set resolved for classpath compilation, so it must be added explicitly or
+    // the compiler reports "Unresolved reference 'sun'". This only affects compilation visibility
+    // of that JDK module — no production code or tests are changed.
+    compilerOptions {
+        freeCompilerArgs.add("-Xadd-modules=jdk.httpserver")
+    }
 }
 
 android {
