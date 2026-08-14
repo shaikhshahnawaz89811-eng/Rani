@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** Restricted embedded shell. It never invokes `sh -c`; command text is tokenized and executable allowlisted. */
 class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
     private val processRef = AtomicReference<Process?>(null)
-    private val allowed = setOf("pwd","ls","echo","cat","head","tail","grep","find","mkdir","touch","rm","cp","mv","git","python","python3","java","javac","kotlinc","node","clang","clang++")
+    private val allowed = setOf("pwd","ls","echo","cat","head","tail","grep","find","mkdir","touch","rm","cp","mv","git","python","python3","java","./gradlew","gradlew","./gradlew.bat","gradlew.bat","npm","npx","pytest","javac","kotlinc","node","clang","clang++")
 
     override fun execute(command: String, workingDirectory: String, timeoutMs: Long): TerminalResult {
         val tokens = tokenize(command.trim())
@@ -16,6 +16,9 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
         if (executable !in allowed) return TerminalResult("Command blocked by embedded shell policy: $executable", 126)
         if (tokens.any { it.contains("&&") || it.contains("||") || it.contains(';') || it.contains('|') || it.contains('>') || it.contains('<') }) {
             return TerminalResult("Shell operators are disabled by security policy.", 126)
+        }
+        if (unsafePathArguments(executable, tokens.drop(1))) {
+            return TerminalResult("Command blocked by workspace security policy: path escapes the workspace.", 126)
         }
         val cwd = resolveDirectory(workingDirectory) ?: return TerminalResult("Invalid working directory.", 1)
         return try {
@@ -40,6 +43,14 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
     }
 
     override fun cancel() { processRef.getAndSet(null)?.destroyForcibly() }
+
+    private fun unsafePathArguments(executable: String, args: List<String>): Boolean {
+        val pathAware = setOf("rm", "cp", "mv", "mkdir", "touch", "cat", "head", "tail", "find")
+        if (executable !in pathAware) return false
+        return args.filterNot { it == "--" || it.startsWith("-") }.any { token ->
+            token.startsWith("/") || token.startsWith("\\") || token.split('/', '\\').any { it == ".." }
+        }
+    }
 
     private fun resolveDirectory(path: String): File? {
         val candidate = File(path).let { if (it.isAbsolute) it else File(workspace, path) }.canonicalFile

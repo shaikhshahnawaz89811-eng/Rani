@@ -6,14 +6,14 @@ import org.junit.Test
 
 class AIServiceTest {
     @Test fun blankRequestIsRejected() = runBlocking {
-        val result = OfflineDemoAI().chat(AIRequest("   "))
+        val result = UnavailableOfflineAI().chat(AIRequest("   "))
         assertTrue(result is AIResult.Failure)
     }
 
-    @Test fun protectedActionsAreNotAutomaticallyExecuted() = runBlocking {
-        val result = OfflineDemoAI().chat(AIRequest("delete this file")) as AIResult.Success
-        assertTrue(result.value.text.contains("approval", ignoreCase = true))
-        assertTrue(result.value.toolRequests.isEmpty())
+    @Test fun unavailableOfflinePathNeverFabricatesAnAnswer() = runBlocking {
+        val result = UnavailableOfflineAI().chat(AIRequest("delete this file"))
+        assertTrue(result is AIResult.Failure)
+        assertTrue((result as AIResult.Failure).error is AIError.ModelUnavailable)
     }
 
     @Test fun permissionGateProtectsWrites() {

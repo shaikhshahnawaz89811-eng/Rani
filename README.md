@@ -18,7 +18,7 @@ Use JDK 17 and Gradle 8.11.1 or run the included GitHub Actions workflow. The su
 app/src/main/java/com/sa/aidesktop/
 - core/window — window contract and manager
 - core/files — file contract and project adapter
-- core/ai — AI contract and offline adapter
+- core/ai — online Groq routing and optional real local GGUF inference
 - core/git — Git contract and confirmation-aware adapter
 - core/terminal — safe terminal contract
 - ui — desktop shell and windows
@@ -33,5 +33,5 @@ The desktop now has a persistent window state model, responsive initial window p
 
 The GitHub Actions workflow remains the intended build/test path. The current generation environment did not have a Gradle executable or Android SDK available, so this archive does not claim a locally built APK.
 
-## Build 7 status
-Offline AI contracts, Sara profile abstraction, project-context model, protected AI tools and approval boundaries are implemented. A deterministic offline AI implementation is included for testing; a real on-device LLM can be plugged in through `LocalModelEngine`/`ModelAdapter`.
+## Offline LLM status
+The offline path uses the real `LocalLlamaEngine`/llama.cpp integration when a valid user-supplied GGUF model is installed in app-private storage. If no valid model is installed, the app reports offline AI as unavailable; it does not use a deterministic/demo response as production fallback.

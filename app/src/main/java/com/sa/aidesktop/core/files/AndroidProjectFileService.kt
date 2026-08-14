@@ -7,7 +7,7 @@ import java.io.IOException
 class AndroidProjectFileService(workspaceRoot: File) : FileService {
     private val root = workspaceRoot.canonicalFile
 
-    init { seedProjectIfNeeded() }
+    init { root.mkdirs() }
 
     private fun safe(path: String): FileResult<File> {
         return try {
@@ -123,14 +123,4 @@ class AndroidProjectFileService(workspaceRoot: File) : FileService {
         else -> FileKind.OTHER
     }
 
-    private fun seedProjectIfNeeded() {
-        root.mkdirs()
-        if (File(root, "src/main.py").exists()) return
-        write("src/main.py", "import math\n\n\ndef add(a, b):\n    return a + b\n\n\ndef main():\n    print(\"Hello, SA Assistant!\")\n    print(\"2 + 3 =\", add(2, 3))\n\n\nif __name__ == \"__main__\":\n    main()\n")
-        write("src/utils.py", "def clamp(value, low, high):\n    return max(low, min(value, high))\n")
-        write("tests/test_main.py", "def test_add():\n    assert 2 + 3 == 5\n")
-        write("README.md", "# MyProject\n\nSA AI Desktop project workspace.\n")
-        write("requirements.txt", "# runtime dependencies\n")
-        createFolder("assets")
-    }
 }

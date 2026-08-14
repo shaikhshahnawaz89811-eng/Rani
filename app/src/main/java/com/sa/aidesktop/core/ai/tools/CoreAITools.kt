@@ -2,18 +2,62 @@ package com.sa.aidesktop.core.ai.tools
 
 import com.sa.aidesktop.core.ai.*
 import com.sa.aidesktop.core.files.*
+import com.sa.aidesktop.core.terminal.TerminalService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class ReadFileTool(private val files:FileService):AITool{
     override val id="read_file";override val description="Read a file from the controlled project workspace.";override val risk=ToolRisk.READ_ONLY
-    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val path=input["path"]?.trim().orEmpty();if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("path is required"));val r=files.read(path); return if(r.isSuccess) AIResult.Success(ToolResult(r.value.orEmpty())) else AIResult.Failure(AIError.Execution("Read failed: ${r.error}"))}
+    override val parameterHints=mapOf("path" to "Workspace-relative path of the file to read")
+    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val path=input["path"]?.trim().orEmpty();if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("path is required"));val r=files.read(path); return if(r.isSuccess) AIResult.Success(ToolResult(r.value.orEmpty().take(32_000) + if (r.value.orEmpty().length > 32_000) "\n[FILE CONTENT TRUNCATED]" else "")) else AIResult.Failure(AIError.Execution("Read failed: ${r.error}"))}
 }
 class SearchFileTool(private val files:FileService):AITool{
     override val id="search_files";override val description="Search project files by name.";override val risk=ToolRisk.READ_ONLY
+    override val parameterHints=mapOf("query" to "Filename substring to search for")
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val q=input["query"]?.trim().orEmpty();if(q.isBlank())return AIResult.Failure(AIError.InvalidRequest("query is required"));val r=files.search(q);return if(r.isSuccess)AIResult.Success(ToolResult(r.value.orEmpty().joinToString("\n"){it.path}))else AIResult.Failure(AIError.Execution("Search failed: ${r.error}"))}
 }
 class WriteFileTool(private val files:FileService):AITool{
     override val id="write_file";override val description="Write a controlled workspace file; approval is enforced by ToolExecutionGateway.";override val risk=ToolRisk.WRITE
+    override val parameterHints=mapOf("path" to "Workspace-relative path of the file to write","content" to "Full new text content of the file")
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val path=input["path"]?.trim().orEmpty();val content=input["content"]?:return AIResult.Failure(AIError.InvalidRequest("content is required"));if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("path is required"));val r=files.write(path,content);return if(r.isSuccess)AIResult.Success(ToolResult("Updated $path",true))else AIResult.Failure(AIError.Execution("Write failed: ${r.error}"))}
+}
+
+/** Phase 1 addition: file.list — lists a directory of the controlled workspace via the existing
+ *  FileService (no duplicate/new file backend). */
+class ListFilesTool(private val files:FileService):AITool{
+    override val id="list_files";override val description="List files and folders inside a directory of the controlled project workspace.";override val risk=ToolRisk.READ_ONLY
+    override val parameterHints=mapOf("path" to "Workspace-relative directory path; empty lists the workspace root")
+    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
+        val path=input["path"]?.trim().orEmpty()
+        val r=files.listDirectory(path)
+        if(!r.isSuccess) return AIResult.Failure(AIError.Execution("List failed: ${r.error}"))
+        val entries=r.value.orEmpty()
+        val listing=entries.joinToString("\n"){ f-> "${if(f.kind==FileKind.FOLDER)"[DIR] " else ""}${f.path} (${f.sizeBytes}b)" }
+        return AIResult.Success(ToolResult(listing.ifBlank{"(empty directory)"}))
+    }
+}
+
+/** Phase 1 addition: terminal.run — executes a command through the existing TerminalService /
+ *  EmbeddedShellBackend (allowlisted executables, workspace-scoped cwd, real timeout/cancel).
+ *  A non-zero exit code, timeout, or cancellation is always surfaced as AIResult.Failure so a
+ *  failed command is never reported as a successful one. */
+class TerminalRunTool(private val terminal:TerminalService):AITool{
+    override val id="run_terminal";override val description="Run a shell command in the sandboxed project terminal workspace.";override val risk=ToolRisk.EXECUTION
+    override val parameterHints=mapOf("command" to "Shell command to execute (workspace-scoped, allowlisted executables only)")
+    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
+        val command=input["command"]?.trim().orEmpty()
+        if(command.isBlank()) return AIResult.Failure(AIError.InvalidRequest("command is required"))
+        val result=withContext(Dispatchers.IO){ terminal.execute(command) }
+        val summary="Exit code: ${result.exitCode}\n${result.output}".trim()
+        return when{
+            result.cancelled -> AIResult.Failure(AIError.Execution("Command cancelled.\n$summary"))
+            result.exitCode==124 -> AIResult.Failure(AIError.Execution("Command timed out.\n$summary"))
+            result.exitCode==126 -> AIResult.Failure(AIError.Execution("Command blocked by security policy.\n$summary"))
+            result.exitCode==127 -> AIResult.Failure(AIError.Execution("Command not found or failed to start.\n$summary"))
+            result.exitCode!=0 -> AIResult.Failure(AIError.Execution("Command failed.\n$summary"))
+            else -> AIResult.Success(ToolResult(summary,changed=true))
+        }
+    }
 }
 
 
@@ -25,9 +69,22 @@ class WindowControlTool(private val manager: com.sa.aidesktop.core.window.Window
         val id = input["id"]?.trim().orEmpty()
         val action = input["action"]?.trim()?.lowercase().orEmpty()
         if (id.isBlank() || action.isBlank()) return AIResult.Failure(AIError.InvalidRequest("id and action are required"))
+        val before = manager.windows.firstOrNull { it.id == id }
+            ?: return AIResult.Failure(AIError.Execution("Window not found: $id"))
+        if (before.protectedByTaskId != null) {
+            return AIResult.Failure(AIError.ToolDenied("Window $id is protected by task ${before.protectedByTaskId}."))
+        }
         when (action) {
-            "move" -> manager.move(id, input["dx"]?.toFloatOrNull() ?: 0f, input["dy"]?.toFloatOrNull() ?: 0f)
-            "resize" -> manager.resize(id, com.sa.aidesktop.core.window.ResizeEdge.BOTTOM_RIGHT, input["dw"]?.toFloatOrNull() ?: 0f, input["dh"]?.toFloatOrNull() ?: 0f)
+            "move" -> {
+                val dx = input["dx"]?.toFloatOrNull() ?: return AIResult.Failure(AIError.InvalidRequest("dx must be a number"))
+                val dy = input["dy"]?.toFloatOrNull() ?: return AIResult.Failure(AIError.InvalidRequest("dy must be a number"))
+                manager.move(id, dx, dy)
+            }
+            "resize" -> {
+                val dw = input["dw"]?.toFloatOrNull() ?: return AIResult.Failure(AIError.InvalidRequest("dw must be a number"))
+                val dh = input["dh"]?.toFloatOrNull() ?: return AIResult.Failure(AIError.InvalidRequest("dh must be a number"))
+                manager.resize(id, com.sa.aidesktop.core.window.ResizeEdge.BOTTOM_RIGHT, dw, dh)
+            }
             "minimize" -> manager.minimize(id)
             "maximize" -> manager.maximize(id)
             "restore" -> manager.restore(id)
@@ -35,6 +92,17 @@ class WindowControlTool(private val manager: com.sa.aidesktop.core.window.Window
             "close" -> manager.close(id)
             else -> return AIResult.Failure(AIError.InvalidRequest("Unsupported window action: $action"))
         }
-        return AIResult.Success(ToolResult("Window $id: $action", changed = true))
+        val after = manager.windows.firstOrNull { it.id == id }
+        val succeeded = when (action) {
+            "close" -> after == null
+            "minimize" -> after?.state == com.sa.aidesktop.core.window.WindowState.MINIMIZED
+            "maximize" -> after?.state == com.sa.aidesktop.core.window.WindowState.MAXIMIZED
+            "restore" -> after?.state == com.sa.aidesktop.core.window.WindowState.NORMAL
+            "focus" -> after?.focused == true
+            "move", "resize" -> after != null && after != before
+            else -> false
+        }
+        return if (succeeded) AIResult.Success(ToolResult("Window $id: $action", changed = true))
+        else AIResult.Failure(AIError.Execution("Window action did not change the requested window state: $action"))
     }
 }

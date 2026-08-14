@@ -22,7 +22,9 @@ data class DesktopWindow(
     val width: Float = 0f,
     val height: Float = 0f,
     val focused: Boolean = false,
-    val restoreBounds: WindowBounds? = null
+    val restoreBounds: WindowBounds? = null,
+    val protectedByTaskId: String? = null,
+    val protectionReason: String? = null
 )
 
 interface WindowManager {

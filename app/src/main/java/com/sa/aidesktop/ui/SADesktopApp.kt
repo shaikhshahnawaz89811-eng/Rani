@@ -34,14 +34,22 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import com.sa.aidesktop.core.settings.AISettingsStore
 import androidx.compose.ui.unit.*
 import com.sa.aidesktop.core.ai.*
+import com.sa.aidesktop.core.browser.AndroidBrowserService
+import com.sa.aidesktop.core.browser.BrowserLimits
 import com.sa.aidesktop.core.ai.tools.*
 import com.sa.aidesktop.core.files.*
 import com.sa.aidesktop.core.git.*
+import com.sa.aidesktop.core.github.*
 import com.sa.aidesktop.core.terminal.*
+import com.sa.aidesktop.core.website.*
+import com.sa.aidesktop.core.workspace.*
+import com.sa.aidesktop.core.coding.*
 import com.sa.aidesktop.core.window.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
@@ -54,7 +62,6 @@ import androidx.compose.ui.res.painterResource
 import com.sa.aidesktop.R
 
 private val manager = DesktopWindowManager()
-private val ai = OfflineDemoAI()
 
 // BUG FIX: the taskbar height (and the "+10f" breathing room above it) used to be a 58f/68f
 // magic number repeated in three places (workspace clamp, DesktopWindowView call, windowDefaults).
@@ -68,8 +75,24 @@ private const val TASKBAR_HEIGHT = 50f
 @Composable fun SADesktopApp() {
     val windows by manager.state.collectAsState()
     val context = LocalContext.current
+    val settingsStore = remember(context) { AISettingsStore(context) }
+    val offlineAi = remember(settingsStore) {
+        LocalLlamaEngine(
+            modelPathProvider = { settingsStore.getLocalModelPath() },
+            configProvider = {
+                LocalModelConfig(
+                    contextSize = settingsStore.getLocalContextSize(),
+                    threads = settingsStore.getLocalThreads(),
+                    maxOutputTokens = settingsStore.getLocalMaxOutputTokens()
+                )
+            }
+        )
+    }
     val files = remember(context) { AndroidProjectFileService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
     val terminal = remember(context) { EmbeddedTerminalService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
+    val browser = remember(context) { AndroidBrowserService(context, context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
+    val githubAccounts = remember(context) { GitHubAccountStore(context) }
+    val githubApi = remember(githubAccounts) { GitHubApiClient(githubAccounts) }
     LaunchedEffect(Unit) { listOf(WindowType.DEVELOPER, WindowType.AI, WindowType.TERMINAL, WindowType.GIT, WindowType.FILES).forEach(manager::open); manager.focus("ai") }
     var startOpen by remember { mutableStateOf(false) }
     // BUG FIX (video timestamps 00:05-00:25): enableEdgeToEdge() in MainActivity draws the
@@ -95,7 +118,7 @@ private const val TASKBAR_HEIGHT = 50f
         DesktopBackdrop()
         DesktopIcons(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it) })
         windows.filter { it.state != WindowState.MINIMIZED }.sortedBy { it.z }.forEach { w ->
-            DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal)
+            DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal, browser, githubAccounts, githubApi, settingsStore, offlineAi)
         }
         Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false }, Modifier.align(Alignment.BottomCenter))
         if (startOpen) StartMenu(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it); startOpen = false }, modifier = Modifier.align(Alignment.BottomStart))
@@ -174,7 +197,7 @@ private const val TASKBAR_HEIGHT = 50f
     }
 }
 
-@Composable private fun DesktopWindowView(w: DesktopWindow, screenW:Float, screenH:Float, files: FileService, terminal: TerminalService) {
+@Composable private fun DesktopWindowView(w: DesktopWindow, screenW:Float, screenH:Float, files: FileService, terminal: TerminalService, browser: AndroidBrowserService, githubAccounts: GitHubAccountStore, githubApi: GitHubApiClient, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine) {
     val default = windowDefaults(w.type, screenW, screenH)
     LaunchedEffect(w.id, w.width, w.height) {
         if (w.width <= 0f || w.height <= 0f) manager.initializeBounds(w.id, default)
@@ -210,12 +233,12 @@ private const val TASKBAR_HEIGHT = 50f
                 Box(contentModifier) {
                     when(w.type){
                         WindowType.DEVELOPER->DeveloperWindow(files)
-                        WindowType.AI->AIWindow()
+                        WindowType.AI->AIWindow(browser, settingsStore, offlineAi)
                         WindowType.TERMINAL->TerminalWindow(terminal)
-                        WindowType.GIT->GitWindow(files)
+                        WindowType.GIT->GitWindow(files, githubAccounts, githubApi)
                         WindowType.FILES->FilesWindow(files)
-                        WindowType.SETTINGS->SettingsWindow()
-                        WindowType.BROWSER->BrowserWindow(w.id)
+                        WindowType.SETTINGS->SettingsWindow(settingsStore, offlineAi)
+                        WindowType.BROWSER->BrowserWindow(w.id, browser)
                     }
                 }
                 if(w.state==WindowState.NORMAL) ResizeHandle(w, width, height, screenW, screenH)
@@ -278,7 +301,7 @@ private val RESIZE_HANDLE_INSET = 12.dp
         })
     },verticalAlignment=Alignment.CenterVertically){
         Icon(Icons.Default.DragHandle,null,Modifier.size(16.dp),tint=if(w.focused) Color(0xFF8F9FC8) else Color(0xFF59627A))
-        Text(w.title,Modifier.weight(1f).padding(start=6.dp),fontSize=12.sp,color=Color(0xFFE5E9F7),maxLines=1)
+        Text(if (w.protectedByTaskId != null) "🔒 ${w.title}" else w.title,Modifier.weight(1f).padding(start=6.dp),fontSize=12.sp,color=Color(0xFFE5E9F7),maxLines=1)
         // BUG FIX (latest screenshot: min/max/close look like "strange different-color blocks"):
         // minimize and maximize previously used a translucent WHITE overlay (0x14FFFFFF) while
         // close used a translucent PINK overlay (0x26FF5C7A) - on top of title bars that already
@@ -301,9 +324,10 @@ private val RESIZE_HANDLE_INSET = 12.dp
 
 @Composable private fun DeveloperWindow(files: FileService){
     var tree by remember { mutableStateOf(files.projectTree()) }
-    var tabs by remember { mutableStateOf(listOf("src/main.py")) }
-    var selectedTab by remember { mutableStateOf("src/main.py") }
-    var buffers by remember { mutableStateOf(mapOf("src/main.py" to files.read("src/main.py").value.orEmpty())) }
+    val initialFile = remember(files) { files.listDirectory("src").value.orEmpty().firstOrNull { it.kind != FileKind.FOLDER }?.path }
+    var tabs by remember(initialFile) { mutableStateOf(initialFile?.let { listOf(it) } ?: emptyList()) }
+    var selectedTab by remember(initialFile) { mutableStateOf(initialFile.orEmpty()) }
+    var buffers by remember(initialFile) { mutableStateOf(initialFile?.let { mapOf(it to files.read(it).value.orEmpty()) } ?: emptyMap()) }
     var savedBuffers by remember { mutableStateOf(buffers) }
 
     fun openFile(path: String) {
@@ -320,8 +344,8 @@ private val RESIZE_HANDLE_INSET = 12.dp
     fun closeTab(path: String) {
         if (buffers[path] != savedBuffers[path]) return
         val nextTabs = tabs - path
-        tabs = if (nextTabs.isEmpty()) listOf("src/main.py") else nextTabs
-        if (selectedTab == path) selectedTab = tabs.first()
+        tabs = nextTabs
+        if (selectedTab == path) selectedTab = tabs.firstOrNull().orEmpty()
     }
 
     // BUG FIX (screenshot 4A: code cut off in the mini window): the Explorer panel used a fixed
@@ -484,10 +508,16 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     }
 }
 
-@Composable private fun AIWindow(){
+@Composable private fun AIWindow(browser: AndroidBrowserService, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine){
     val context = LocalContext.current
     val files = remember(context) { AndroidProjectFileService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
-    val service = remember { OfflineDemoAI() }
+    val terminal = remember(context) { EmbeddedTerminalService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
+    val workspaceManager = remember(context) { ProjectWorkspaceManager(context.filesDir.resolve("SA-AIDesktop/workspaces")) }
+    val aiWeb = remember(browser) { AIWebService(browser) }
+    val gitRoot = context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")
+    val gitService = remember(gitRoot.absolutePath) { CommandGitService(gitRoot) }
+    val githubAccounts = remember(context) { GitHubAccountStore(context) }
+    val githubApi = remember(githubAccounts) { GitHubApiClient(githubAccounts) }
     val tts = remember(context) { AndroidTextToSpeechEngine(context) }
     val stt = remember(context) { AndroidSpeechToTextEngine(context) }
     val voiceScope = rememberCoroutineScope()
@@ -495,32 +525,99 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     val transcript by stt.transcript.collectAsState()
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> if (granted) stt.start() }
     DisposableEffect(tts, stt) { onDispose { tts.release(); stt.release() } }
-    val tools = remember(files) { ToolRegistry(listOf(ReadFileTool(files), SearchFileTool(files), WriteFileTool(files), WindowControlTool(manager))) }
+    val tools = remember(files, terminal, browser) {
+        ToolRegistry(
+            listOf(
+                ReadFileTool(files), SearchFileTool(files), WriteFileTool(files), ListFilesTool(files),
+                TerminalRunTool(terminal), WindowControlTool(manager),
+                com.sa.aidesktop.core.browser.BrowserOpenTool(browser, manager),
+                com.sa.aidesktop.core.browser.BrowserNavigationTool("back", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserNavigationTool("forward", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserNavigationTool("reload", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserNavigationTool("stop", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserInspectTool(browser, manager),
+                com.sa.aidesktop.core.browser.BrowserSearchTool(browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("click", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("type", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("clear", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("select", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("check", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("scroll", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("focus", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("download", browser, manager),
+                com.sa.aidesktop.core.browser.BrowserElementTool("upload", browser, manager),
+                AIWebDetectTool(aiWeb), AIWebInspectTool(aiWeb), AIWebTypeTool(aiWeb), AIWebSendTool(aiWeb),
+                AIWebWaitTool(aiWeb), AIWebReadTool(aiWeb), AIWebUploadTool(aiWeb),
+                ProjectInspectTreeTool(files), ProjectDiscoverTool(workspaceManager, context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")),
+                ZipWorkspaceTool(workspaceManager), BuildProjectTool(terminal),
+                GitStatusTool(gitService), GitDiffTool(gitService), GitLogTool(gitService), GitRemoteTool(gitService),
+                GitInitTool(gitService), GitAddTool(gitService), GitCommitTool(gitService), GitFetchTool(gitService),
+                GitPushTool(gitService), GitPullTool(gitService), GitCloneTool(gitService), GitBranchTool(gitService),
+                GitCheckoutTool(gitService), GitMergeTool(gitService),
+                GitHubAccountStatusTool(githubAccounts), GitHubListRepositoriesTool(githubApi), GitHubCreateRepositoryTool(githubApi)
+            )
+        )
+    }
     val gate = remember { PermissionGate() }
     val gateway = remember(tools) { ToolExecutionGateway(tools, gate) }
+    val taskStore = remember(context) { CodingTaskStore(context.filesDir.resolve("SA-AIDesktop/tasks/active.properties")) }
+    // Phase 8 model router: real Groq when configured, with the real local GGUF LLM as fallback.
+    val groqClient = remember { GroqClient(apiKeyProvider = { settingsStore.getApiKey() }) }
+    val router = remember(tools, offlineAi) { ModelRouter(groqClient, offlineAi, hasApiKey = { settingsStore.hasApiKey() }, settingsProvider = { settingsStore.toGroqSettings() }, toolRegistry = tools) }
+    val service: AIService = router
+    val taskEngine = remember(router, gateway, taskStore) { TaskEngine(router, gateway, taskStore) }
+    LaunchedEffect(taskEngine) {
+        while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+            val task = taskEngine.current()
+            val protectedTypes = task?.let { TaskWindowProtection.protectedWindowTypes(it) }.orEmpty()
+            val ids = manager.windows.filter { it.type in protectedTypes }.map { it.id }.toSet()
+            if (task != null && ids.isNotEmpty()) {
+                manager.setTaskProtection(ids, task.taskId, TaskWindowProtection.reason(task))
+            } else {
+                task?.let { manager.clearTaskProtection(it.taskId) }
+            }
+            kotlinx.coroutines.delay(250L)
+        }
+    }
     val scope = rememberCoroutineScope()
     var input by remember{mutableStateOf("")}
     var busy by remember{mutableStateOf(false)}
     var pending by remember{mutableStateOf<ToolRequest?>(null)}
+    var pendingTaskId by remember{mutableStateOf<String?>(null)}
+    var tier by remember{mutableStateOf<RouterTier?>(null)}
     LaunchedEffect(transcript) { if (transcript.isNotBlank()) input = transcript }
     val profile = remember { AIProfile("sara", "Sara", "calm developer assistant", "default", "Hinglish", "sara") }
     val msgs=remember{mutableStateListOf(
-        AIMessage("Hello! I'm ${profile.name}\nOffline developer assistant ready.",false,"Now"),
+        AIMessage("Hello! I'm ${profile.name}\n${if(settingsStore.hasApiKey()) "Groq is configured — I'll use it, and fall back to the real offline model is unavailable only if a request fails." else "No Groq key is configured. I'll use the local GGUF model if one is configured; otherwise I'll report that offline AI is unavailable."}",false,"Now"),
         AIMessage("Main project context ko need ke hisaab se use karungi. File changes aur sensitive actions approval ke bina apply nahi honge.",false,"Now")
     )}
     fun send(){
         val p=input.trim(); if(p.isBlank() || busy) return
         msgs.add(AIMessage(p,true,"Now")); input=""; busy=true
+        val isTask = Regex("(?i)(project|zip|build|fix|modify|change|commit|push|github|claude|chatgpt|gemini|upload|download|calculator|app banao|code)").containsMatchIn(p)
         scope.launch {
-            when(val result=service.chat(AIRequest(p, ProjectContext(projectStructure="MyProject workspace")))){
-                is AIResult.Success -> {
-                    msgs.add(AIMessage(result.value.text,false,"Now"))
-                    pending=result.value.toolRequests.firstOrNull { gate.requiresApproval(it.risk) }
+            if(isTask){
+                val run=taskEngine.start(p, ProjectContext(projectStructure="MyProject workspace"))
+                msgs.add(AIMessage(taskStatusMessage(run.record),false,"Now"))
+                pending=run.pendingTool
+                pendingTaskId=run.pendingTool?.let { run.record.taskId }
+            } else {
+                when(val result=service.chat(AIRequest(p, ProjectContext(projectStructure="MyProject workspace")))){
+                    is AIResult.Success -> {
+                        msgs.add(AIMessage(result.value.text,false,"Now"))
+                        pending=result.value.toolRequests.firstOrNull { gate.requiresApproval(it.risk) }
+                        pendingTaskId=null
+                    }
+                    is AIResult.Failure -> msgs.add(AIMessage("AI error: ${result.error}",false,"Now"))
                 }
-                is AIResult.Failure -> msgs.add(AIMessage("AI error: ${result.error}",false,"Now"))
             }
+            tier=router.currentStatus().lastTier
             busy=false
         }
+    }
+    fun taskStatusMessage(r: AgentTaskRecord): String = buildString {
+        append("Task ${r.taskId.take(8)}: ${r.state}. ")
+        if(r.waitingReason != null) append(r.waitingReason) else if(r.finalResult.isNotBlank()) append(r.finalResult) else append(r.lastToolResult.ifBlank { r.currentOperation.ifBlank { "Task state saved; next step will reconcile real state." } })
     }
     Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
         Row(Modifier.fillMaxWidth().height(52.dp).background(Color(0xFF10121D)).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
@@ -529,7 +626,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             // explicit color, so it inherited theme content color instead of a color chosen for
             // this dark header. Explicit light color added; the status line beneath it already
             // had an explicit (readable) color and is unchanged.
-            Column(Modifier.padding(start=9.dp).weight(1f)){Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF));Text("Offline-ready • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))}
+            Column(Modifier.padding(start=9.dp).weight(1f)){Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF));Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Offline Local LLM";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->"Offline model missing";null->if(settingsStore.hasApiKey())"Groq configured" else "Offline model missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))}
             Text(if(busy) "Thinking…" else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
         }
         Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
@@ -550,15 +647,27 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                     Text("Approval required",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Color(0xFFE4C7FF))
                     Text("Tool: ${request.toolId} • Risk: ${request.risk}",fontSize=9.sp,color=Color(0xFFAFA7BE))
                     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End){
-                        TextButton(onClick={pending=null}){Text("Cancel",fontSize=9.sp)}
+                        TextButton(onClick={pending=null; pendingTaskId=null}){Text("Cancel",fontSize=9.sp)}
                         TextButton(onClick={
                             val requestToApply=request
+                            val taskId=pendingTaskId
                             scope.launch {
                                 when(val applied=gateway.execute(requestToApply, approved=true)){
-                                    is AIResult.Success -> msgs.add(AIMessage("Applied: ${applied.value.output}",false,"Now"))
-                                    is AIResult.Failure -> msgs.add(AIMessage("Action failed: ${applied.error}",false,"Now"))
+                                    is AIResult.Success -> {
+                                        msgs.add(AIMessage("Applied: ${applied.value.output}",false,"Now"))
+                                        if(taskId!=null){
+                                            val continued=taskEngine.continueAfterApprovedTool(taskId, requestToApply, applied, ProjectContext(projectStructure="MyProject workspace"))
+                                            msgs.add(AIMessage(taskStatusMessage(continued.record),false,"Now"))
+                                            pending=continued.pendingTool
+                                            pendingTaskId=continued.pendingTool?.let { continued.record.taskId }
+                                        }
+                                    }
+                                    is AIResult.Failure -> {
+                                        msgs.add(AIMessage("Action failed: ${applied.error}",false,"Now"))
+                                        if(taskId!=null){ pending=null; pendingTaskId=null }
+                                    }
                                 }
-                                pending=null
+                                if(taskId==null){ pending=null; pendingTaskId=null }
                             }
                         }){Text("Apply",fontSize=9.sp)}
                     }
@@ -636,22 +745,124 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     }
 }
 
-@Composable private fun GitWindow(files: FileService){
+@Composable private fun GitWindow(files: FileService, githubAccounts: GitHubAccountStore, githubApi: GitHubApiClient){
     val context=LocalContext.current
     val root=context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")
     val service=remember(root.absolutePath){CommandGitService(root)}
     val scope=rememberCoroutineScope()
-    var message by remember{mutableStateOf("")}; var confirmPush by remember{mutableStateOf(false)}; var status by remember{mutableStateOf<GitStatus?>(null)}; var result by remember{mutableStateOf("")}; var busy by remember{mutableStateOf(false)}
-    fun show(r:GitResult<String>){ result=when(r){is GitResult.Success->r.value.ifBlank{"Done"};is GitResult.Failure->when(val e=r.error){is GitError.Validation->e.message;is GitError.NotAvailable->e.message;is GitError.Command->"Git error (${e.code}): ${e.message}";is GitError.Permission->"Permission: ${e.message}"}} }
-    fun refresh(){scope.launch{busy=true;status=when(val r=service.status()){is GitResult.Success->r.value;is GitResult.Failure->{result="Git status failed: ${r.error}";null}};busy=false}}
+    var message by remember{mutableStateOf("")}
+    var confirmPush by remember{mutableStateOf(false)}
+    var status by remember{mutableStateOf<GitStatus?>(null)}
+    var result by remember{mutableStateOf("")}
+    var busy by remember{mutableStateOf(false)}
+    var githubToken by remember{mutableStateOf("")}
+    var githubStatus by remember{mutableStateOf(githubAccounts.active()?.login ?: "Not connected")}
+    fun show(r:GitResult<String>){ result=when(r){
+        is GitResult.Success->r.value.ifBlank{"Done"}
+        is GitResult.Failure->when(val e=r.error){
+            is GitError.Validation->e.message
+            is GitError.NotAvailable->e.message
+            is GitError.Command->"Git error (${e.code}): ${e.message}"
+            is GitError.Permission->"Permission: ${e.message}"
+            is GitError.AuthenticationRequired->"Authentication required: ${e.message}"
+            is GitError.DirtyWorkspace->e.message
+        }
+    }}
+    fun refresh(){scope.launch{busy=true;status=when(val r=service.status()){
+        is GitResult.Success->r.value
+        is GitResult.Failure->{result="Git status failed: ${r.error}";null}
+    };busy=false}}
     LaunchedEffect(Unit){refresh()}
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(10.dp)){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("SOURCE CONTROL",fontSize=11.sp,color=Color(0xFF9FAAD0),modifier=Modifier.weight(1f));Text(status?.branch?:"No repository",fontSize=9.sp,color=Color(0xFF8FA0C5));IconButton({refresh()},enabled=!busy,modifier=Modifier.size(30.dp)){Icon(Icons.Default.Refresh,"Refresh")}}
-        Spacer(Modifier.height(6.dp)); Text("Changes",fontSize=13.sp,fontWeight=FontWeight.Bold); status?.changes?.forEach{Row(Modifier.fillMaxWidth().padding(vertical=5.dp)){Text(it.path,Modifier.weight(1f),fontSize=11.sp);Text(it.state,fontSize=10.sp,color=Color(0xFFFFB45B))}}
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(10.dp)){
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+            Text("SOURCE CONTROL",fontSize=11.sp,color=Color(0xFF9FAAD0),modifier=Modifier.weight(1f))
+            Text(status?.branch?:"No repository",fontSize=9.sp,color=Color(0xFF8FA0C5))
+            IconButton({refresh()},enabled=!busy,modifier=Modifier.size(30.dp)){Icon(Icons.Default.Refresh,"Refresh")}
+        }
+        Text(
+            "ahead ${status?.ahead ?: 0} · behind ${status?.behind ?: 0} · upstream ${status?.upstream ?: "none"}",
+            fontSize=8.sp,color=Color(0xFF7F8AA8)
+        )
+        Spacer(Modifier.height(6.dp))
+        Text("Changes",fontSize=13.sp,fontWeight=FontWeight.Bold)
+        status?.changes?.forEach{Row(Modifier.fillMaxWidth().padding(vertical=5.dp)){
+            Text(it.path,Modifier.weight(1f),fontSize=11.sp)
+            Text((if(it.staged)"STAGED " else "")+it.state,fontSize=9.sp,color=Color(0xFFFFB45B))
+        }}
         if(status?.changes?.isEmpty()==true) Text("Working tree clean",fontSize=10.sp,color=Color(0xFF79DFA0))
-        Spacer(Modifier.weight(1f)); TextField(message,{message=it},Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("Commit message",fontSize=10.sp)},colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF12131C),unfocusedContainerColor=Color(0xFF12131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
-        Row(Modifier.fillMaxWidth()){Button({scope.launch{busy=true;val paths=status?.changes?.map{it.path}.orEmpty();val a=service.add(paths);if(a is GitResult.Failure)result="Add failed: ${a.error}" else show(service.commit(message));message="";refresh()}},enabled=!busy&&status?.changes?.isNotEmpty()==true,modifier=Modifier.weight(1f)){Text("Commit")};Spacer(Modifier.width(6.dp));Button({confirmPush=true},enabled=!busy&&status?.changes?.isNotEmpty()==true,modifier=Modifier.weight(1f)){Text("Commit & Push")} }
-        Row(Modifier.fillMaxWidth()){TextButton({scope.launch{show(service.pull());refresh()}},enabled=!busy){Text("Pull")};TextButton({scope.launch{show(service.fetch());refresh()}},enabled=!busy){Text("Fetch")};TextButton({scope.launch{show(service.diff())}},enabled=!busy){Text("Diff")}}
-        if(confirmPush){AlertDialog(onDismissRequest={confirmPush=false},title={Text("Confirm Git Push")},text={Text("Push the current commit to the configured remote? This is a network-sensitive action.")},confirmButton={TextButton(onClick={confirmPush=false;scope.launch{busy=true;val paths=status?.changes?.map{it.path}.orEmpty();val a=service.add(paths);if(a is GitResult.Failure){result="Add failed: ${a.error}"}else{when(val c=service.commit(message)){is GitResult.Success->show(service.push(true));is GitResult.Failure->result="Commit failed: ${c.error}"};message=""};refresh();busy=false}}){Text("Push")}},dismissButton={TextButton(onClick={confirmPush=false}){Text("Cancel")}})}
+        Spacer(Modifier.height(8.dp))
+        Text("GitHub account",fontSize=12.sp,fontWeight=FontWeight.Bold)
+        Text(githubStatus,fontSize=9.sp,color=if(githubStatus=="Not connected")Color(0xFFFFC36B)else Color(0xFF79DFA0))
+        OutlinedTextField(
+            value=githubToken,onValueChange={githubToken=it},singleLine=true,
+            visualTransformation=PasswordVisualTransformation(),
+            label={Text("GitHub token (never sent to Sara/Groq)",fontSize=9.sp)},
+            modifier=Modifier.fillMaxWidth().padding(top=5.dp)
+        )
+        Row{
+            TextButton(onClick={
+                if(githubToken.isNotBlank()) scope.launch {
+                    busy=true
+                    when(val r=githubApi.verifyToken(githubToken)){
+                        is GitHubResult.Success->{githubStatus=r.value.login;githubToken="";result="GitHub account verified and encrypted locally."}
+                        is GitHubResult.Failure->{result="GitHub verification failed: ${r.message}"}
+                    }
+                    busy=false
+                }
+            },enabled=!busy&&githubToken.isNotBlank()){Text("Verify & Save",fontSize=9.sp)}
+            TextButton(onClick={
+                githubAccounts.active()?.let{githubAccounts.remove(it.id)}
+                githubStatus="Not connected";result="GitHub account removed from secure storage."
+            },enabled=!busy&&githubAccounts.active()!=null){Text("Remove",fontSize=9.sp,color=Color(0xFFFF7A9A))}
+        }
+        Text("Use a GitHub token created on GitHub. Sara never receives the token value and it is stored through Android Keystore-backed SecureStore.",fontSize=8.sp,color=Color(0xFF7C86A6))
+        Spacer(Modifier.height(8.dp))
+        TextField(message,{message=it},Modifier.fillMaxWidth(),singleLine=true,placeholder={Text("Commit message",fontSize=10.sp)},colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF12131C),unfocusedContainerColor=Color(0xFF12131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
+        Row(Modifier.fillMaxWidth()){
+            Button({scope.launch{
+                busy=true
+                val paths=status?.changes?.map{it.path}.orEmpty()
+                when(val a=service.add(paths)){
+                    is GitResult.Failure->result="Add failed: ${a.error}"
+                    is GitResult.Success->when(val c=service.commit(message)){
+                        is GitResult.Success->{result=c.value;if(message.isNotBlank())message=""}
+                        is GitResult.Failure->result="Commit failed: ${c.error}"
+                    }
+                }
+                refresh()
+                busy=false
+            }},enabled=!busy&&status?.changes?.isNotEmpty()==true&&message.isNotBlank(),modifier=Modifier.weight(1f)){Text("Commit")}
+            Spacer(Modifier.width(6.dp))
+            Button({confirmPush=true},enabled=!busy&&status?.changes?.isNotEmpty()==true&&message.isNotBlank(),modifier=Modifier.weight(1f)){Text("Commit & Push")}
+        }
+        Row(Modifier.fillMaxWidth()){
+            TextButton({scope.launch{busy=true;show(service.pull(confirmed=true));refresh();busy=false}},enabled=!busy){Text("Pull")}
+            TextButton({scope.launch{busy=true;show(service.fetch());refresh();busy=false}},enabled=!busy){Text("Fetch")}
+            TextButton({scope.launch{busy=true;show(service.diff());busy=false}},enabled=!busy){Text("Diff")}
+            TextButton({scope.launch{busy=true;show(service.diff(true));busy=false}},enabled=!busy){Text("Staged Diff")}
+        }
+        if(result.isNotBlank()) Text(result,fontSize=9.sp,color=Color(0xFFB8C3E5),modifier=Modifier.padding(top=5.dp))
+        if(confirmPush){AlertDialog(
+            onDismissRequest={confirmPush=false},
+            title={Text("Confirm Git Push")},
+            text={Text("Push the current branch to its configured remote using a normal non-force push? The workspace will not be force-pushed.")},
+            confirmButton={TextButton(onClick={
+                confirmPush=false
+                scope.launch{
+                    busy=true
+                    val paths=status?.changes?.map{it.path}.orEmpty()
+                    when(val a=service.add(paths)){
+                        is GitResult.Failure->result="Add failed: ${a.error}"
+                        is GitResult.Success->when(val c=service.commit(message)){
+                            is GitResult.Success->{show(service.push(confirmed=true));message=""}
+                            is GitResult.Failure->result="Commit failed: ${c.error}"
+                        }
+                    }
+                    refresh();busy=false
+                }
+            }){Text("Push")}},
+            dismissButton={TextButton(onClick={confirmPush=false}){Text("Cancel")}}
+        )}
     }
 }
 
@@ -688,41 +899,174 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     }
 }
 
-@Composable private fun SettingsWindow(){Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)){Text("Appearance",fontSize=13.sp,fontWeight=FontWeight.Bold);Text("Dark / deep purple / neon blue",fontSize=11.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(vertical=8.dp));Divider();Text("AI Profile",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Name: Sara\nMode: Offline-ready\nVoice: replaceable adapter",fontSize=11.sp,color=Color(0xFF9AA7C8));Divider();Text("Security",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Sensitive actions require confirmation. Secrets are not stored in source code.",fontSize=11.sp,color=Color(0xFF9AA7C8))}}
-@Composable private fun BrowserWindow(windowId: String){
-    var address by remember(windowId){ mutableStateOf("https://www.google.com") }
-    val context = LocalContext.current
-    val webView = remember(windowId) { WebView(context).apply {
-        webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView, url: String) { address = url }
+
+@Composable private fun SettingsWindow(settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine){
+    val context=LocalContext.current
+    val store=settingsStore
+    val localModelManager = remember(context) { LocalModelManager(context) }
+    var apiKeyInput by remember{ mutableStateOf("") }
+    var apiKeyConfigured by remember{ mutableStateOf(store.hasApiKey()) }
+    var model by remember{ mutableStateOf(store.getModel()) }
+    var timeoutSeconds by remember{ mutableStateOf((store.getTimeoutMs()/1000).toString()) }
+    var retryLimit by remember{ mutableStateOf(store.getRetryLimit().toString()) }
+    var maxTokens by remember{ mutableStateOf(store.getMaxOutputTokens()?.toString() ?: "") }
+    var savedNotice by remember{ mutableStateOf<String?>(null) }
+    var localPath by remember { mutableStateOf(store.getLocalModelPath().orEmpty()) }
+    var localContext by remember { mutableStateOf(store.getLocalContextSize().toString()) }
+    var localThreads by remember { mutableStateOf(store.getLocalThreads().toString()) }
+    var localMaxTokens by remember { mutableStateOf(store.getLocalMaxOutputTokens().toString()) }
+    var localBusy by remember { mutableStateOf(false) }
+    var localStatus by remember { mutableStateOf<String?>(null) }
+    val localScope = rememberCoroutineScope()
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            localBusy = true
+            localStatus = "Preparing local model storage…"
+            localScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                offlineAi.unload()
+                val result = localModelManager.installFromUri(context.contentResolver, uri)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    localBusy = false
+                    result.onSuccess {
+                        store.setLocalModelPath(it.absolutePath)
+                        localPath = it.absolutePath
+                        localStatus = "Valid GGUF model installed. It will load on first local request."
+                    }.onFailure { localStatus = "Model import failed: ${it.message ?: it.javaClass.simpleName}" }
+                }
+            }
         }
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.loadsImagesAutomatically = true
-        settings.useWideViewPort = true
-        settings.loadWithOverviewMode = true
-        loadUrl(address)
-    }}
-    DisposableEffect(webView) { onDispose { webView.stopLoading(); webView.destroy() } }
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)){
+        Text("Appearance",fontSize=13.sp,fontWeight=FontWeight.Bold);Text("Dark / deep purple / neon blue",fontSize=11.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(vertical=8.dp));Divider()
+        Text("AI Profile",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Name: Sara\nVoice: replaceable adapter",fontSize=11.sp,color=Color(0xFF9AA7C8));Divider()
+
+        // Phase 1: real Groq provider configuration. The key is stored only through SecureStore
+        // (AndroidKeyStore-backed AES/GCM) and is never shown back in full once saved.
+        Text("AI Provider — Groq (online)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
+        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — local model will be used if installed",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF79DFA0) else Color(0xFFFFC36B),modifier=Modifier.padding(top=6.dp))
+        OutlinedTextField(
+            value=apiKeyInput,onValueChange={apiKeyInput=it},
+            label={Text("Groq API key",fontSize=10.sp)},
+            singleLine=true,visualTransformation=PasswordVisualTransformation(),
+            modifier=Modifier.fillMaxWidth().padding(top=8.dp)
+        )
+        Row(Modifier.padding(top=6.dp)){
+            TextButton(onClick={ if(apiKeyInput.isNotBlank()){ store.setApiKey(apiKeyInput); apiKeyInput=""; apiKeyConfigured=true; savedNotice="Saved." } }){Text("Save key",fontSize=10.sp)}
+            TextButton(onClick={ store.clearApiKey(); apiKeyConfigured=false; savedNotice="API key removed." }){Text("Remove key",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+        }
+        OutlinedTextField(value=model,onValueChange={model=it},label={Text("Groq model",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=10.dp))
+        Row(Modifier.fillMaxWidth().padding(top=8.dp)){
+            OutlinedTextField(value=timeoutSeconds,onValueChange={timeoutSeconds=it.filter(Char::isDigit)},label={Text("Timeout (sec)",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f).padding(end=6.dp))
+            OutlinedTextField(value=retryLimit,onValueChange={retryLimit=it.filter(Char::isDigit)},label={Text("Retry limit",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f))
+        }
+        OutlinedTextField(value=maxTokens,onValueChange={maxTokens=it.filter(Char::isDigit)},label={Text("Max output tokens (blank = provider default)",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp))
+        TextButton(onClick={
+            store.setModel(model)
+            timeoutSeconds.toIntOrNull()?.let{ store.setTimeoutMs(it*1000) }
+            retryLimit.toIntOrNull()?.let{ store.setRetryLimit(it) }
+            store.setMaxOutputTokens(maxTokens.toIntOrNull())
+            model=store.getModel();timeoutSeconds=(store.getTimeoutMs()/1000).toString();retryLimit=store.getRetryLimit().toString();maxTokens=store.getMaxOutputTokens()?.toString()?:""
+            savedNotice="Settings saved."
+        },modifier=Modifier.padding(top=6.dp)){Text("Save provider settings",fontSize=10.sp)}
+        savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF79DFA0),modifier=Modifier.padding(top=4.dp)) }
+        Text("Values are clamped to safe ranges automatically. Groq remains online; the local model is used only when configured and available.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Divider(Modifier.padding(top=14.dp))
+
+        Text("AI Provider — Offline Local LLM",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
+        Text("Real GGUF inference runs on-device through llama.cpp. No Groq, web API, or runtime downloader is used.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
+        Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFFFC36B) else Color(0xFF79DFA0),modifier=Modifier.padding(top=6.dp))
+        Row(Modifier.padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
+            TextButton(onClick={ if(!localBusy) modelPicker.launch(arrayOf("application/octet-stream","application/*","*/*")) },enabled=!localBusy){Text(if(localBusy) "Importing…" else "Select GGUF model",fontSize=10.sp)}
+            TextButton(onClick={ localScope.launch { offlineAi.unload(); localStatus="Offline model unloaded from native memory." } }){Text("Unload",fontSize=10.sp)}
+            TextButton(onClick={
+                if (!localBusy) localScope.launch {
+                    offlineAi.unload()
+                    if (localModelManager.removeModel()) {
+                        store.setLocalModelPath(null)
+                        localPath = ""
+                        localStatus = "Local model removed from app storage."
+                    } else {
+                        localStatus = "Local model could not be removed."
+                    }
+                }
+            }){Text("Remove",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+        }
+        OutlinedTextField(value=localContext,onValueChange={localContext=it.filter(Char::isDigit)},label={Text("Context size",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=4.dp))
+        Row(Modifier.fillMaxWidth().padding(top=6.dp)){
+            OutlinedTextField(value=localThreads,onValueChange={localThreads=it.filter(Char::isDigit)},label={Text("CPU threads",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f).padding(end=6.dp))
+            OutlinedTextField(value=localMaxTokens,onValueChange={localMaxTokens=it.filter(Char::isDigit)},label={Text("Max output",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f))
+        }
+        TextButton(onClick={ store.setLocalContextSize(localContext.toIntOrNull() ?: 2048); store.setLocalThreads(localThreads.toIntOrNull() ?: 4); store.setLocalMaxOutputTokens(localMaxTokens.toIntOrNull() ?: 256); localContext=store.getLocalContextSize().toString(); localThreads=store.getLocalThreads().toString(); localMaxTokens=store.getLocalMaxOutputTokens().toString(); localStatus="Offline model settings saved." },modifier=Modifier.padding(top=4.dp)){Text("Save offline settings",fontSize=10.sp)}
+        localStatus?.let { Text(it,fontSize=9.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=4.dp)) }
+        Text("Recommended starting point: a small Q4 GGUF model such as Qwen2.5 0.5B (~400 MiB). The model is not bundled or downloaded by Sara; import the GGUF yourself. CPU/NEON inference is used by the bundled runtime.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+
+        Text("Security",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Sensitive actions require confirmation. Secrets are not stored in source code, logs, or plaintext preferences — the Groq key lives only in the Android-Keystore-backed secure store.",fontSize=11.sp,color=Color(0xFF9AA7C8))
+    }
+}
+@Composable private fun BrowserWindow(windowId: String, browser: AndroidBrowserService){
+    val context = LocalContext.current
+    val stateMap by browser.states.collectAsState()
+    val state = stateMap[windowId]
+    var address by remember(windowId){ mutableStateOf(state?.url ?: "https://www.google.com") }
+    val webView = remember(windowId) { WebView(context) }
+    val scope = rememberCoroutineScope()
+
+    DisposableEffect(webView, windowId) {
+        browser.register(windowId, webView)
+        onDispose { browser.unregister(windowId) }
+    }
+
+    LaunchedEffect(state?.url) {
+        if (!state?.url.isNullOrBlank()) address = state.url
+    }
+
     Column(Modifier.fillMaxSize().background(Color(0xFF080910))) {
         Row(Modifier.fillMaxWidth().height(42.dp).padding(horizontal=6.dp),verticalAlignment=Alignment.CenterVertically){
-            IconButton(onClick={if(webView.canGoBack())webView.goBack()},modifier=Modifier.size(32.dp)){Icon(Icons.Default.ArrowBack,"Back",Modifier.size(16.dp))}
-            IconButton(onClick={if(webView.canGoForward())webView.goForward()},modifier=Modifier.size(32.dp)){Icon(Icons.Default.ArrowForward,"Forward",Modifier.size(16.dp))}
-            IconButton(onClick={webView.reload()},modifier=Modifier.size(32.dp)){Icon(Icons.Default.Refresh,"Refresh",Modifier.size(16.dp))}
-            TextField(address,{address=it},Modifier.weight(1f).height(38.dp),singleLine=true,placeholder={Text("Search or enter address",fontSize=10.sp)},colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF11131C),unfocusedContainerColor=Color(0xFF11131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
+            IconButton(onClick={ scope.launch { browser.back(windowId) } },modifier=Modifier.size(32.dp)){
+                Icon(Icons.Default.ArrowBack,"Back",Modifier.size(16.dp))
+            }
+            IconButton(onClick={ scope.launch { browser.forward(windowId) } },modifier=Modifier.size(32.dp)){
+                Icon(Icons.Default.ArrowForward,"Forward",Modifier.size(16.dp))
+            }
+            IconButton(onClick={ scope.launch { browser.reload(windowId) } },modifier=Modifier.size(32.dp)){
+                Icon(Icons.Default.Refresh,"Reload",Modifier.size(16.dp))
+            }
+            IconButton(onClick={ scope.launch { browser.stop(windowId) } },modifier=Modifier.size(32.dp)){
+                Icon(Icons.Default.Close,"Stop",Modifier.size(15.dp))
+            }
+            TextField(
+                value=address,
+                onValueChange={address=it},
+                Modifier.weight(1f).height(38.dp),
+                singleLine=true,
+                placeholder={Text("Search or enter address",fontSize=10.sp)},
+                colors=TextFieldDefaults.colors(
+                    focusedContainerColor=Color(0xFF11131C),
+                    unfocusedContainerColor=Color(0xFF11131C),
+                    focusedIndicatorColor=Color.Transparent,
+                    unfocusedIndicatorColor=Color.Transparent
+                ),
+                keyboardActions=androidx.compose.foundation.text.KeyboardActions(
+                    onDone={ scope.launch { browser.open(windowId,address) } }
+                )
+            )
             TextButton(onClick={ manager.openNew(WindowType.BROWSER) }){Text("New",fontSize=10.sp)}
-            TextButton(onClick={
-                val target=address.trim()
-                if(target.isNotBlank()){
-                    val url=when {
-                        target.startsWith("http://")||target.startsWith("https://") -> target
-                        target.contains(" ") -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(target,"UTF-8")
-                        else -> "https://" + target
-                    }
-                    webView.loadUrl(url)
-                }
-            }){Text("Go",fontSize=10.sp)}
+            TextButton(onClick={ scope.launch { browser.open(windowId,address) } }){Text("Go",fontSize=10.sp)}
         }
+        if (state?.loading == true) {
+            LinearProgressIndicator(
+                progress = { state.progress.coerceIn(0,100) / 100f },
+                modifier=Modifier.fillMaxWidth().height(2.dp)
+            )
+        }
+        state?.lastError?.let {
+            Text("Browser error: $it",fontSize=9.sp,color=Color(0xFFFF9AAE),modifier=Modifier.padding(horizontal=8.dp,vertical=3.dp))
+        }
+        Text(
+            if (state?.title.isNullOrBlank()) "No page title" else state.title,
+            fontSize=8.sp,color=Color(0xFF7F8AA8),
+            maxLines=1,modifier=Modifier.padding(horizontal=8.dp,vertical=2.dp)
+        )
         AndroidView(factory={webView},modifier=Modifier.weight(1f).fillMaxWidth())
     }
 }

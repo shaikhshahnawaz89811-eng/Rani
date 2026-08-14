@@ -61,16 +61,19 @@ class DesktopWindowManager : WindowManager {
     }
 
     override fun close(id: String) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         val remaining = _windows.value.filterNot { it.id == id }
         _windows.value = focusTop(remaining)
     }
 
     override fun minimize(id: String) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         val updated = _windows.value.map { if (it.id == id) it.copy(state = WindowState.MINIMIZED, focused = false) else it.copy(focused = false) }
         _windows.value = focusTop(updated)
     }
 
     override fun maximize(id: String) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         z += 1
         _windows.value = _windows.value.map {
             when {
@@ -82,6 +85,7 @@ class DesktopWindowManager : WindowManager {
     }
 
     override fun restore(id: String) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         z += 1
         _windows.value = _windows.value.map {
             if (it.id != id) it.copy(focused = false)
@@ -109,10 +113,12 @@ class DesktopWindowManager : WindowManager {
     }
 
     override fun move(id: String, dx: Float, dy: Float) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         update(id) { it.copy(x = it.x + dx, y = it.y + dy) }
     }
 
     override fun resize(id: String, dw: Float, dh: Float) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         resize(id, ResizeEdge.BOTTOM_RIGHT, dw, dh)
     }
 
@@ -123,6 +129,7 @@ class DesktopWindowManager : WindowManager {
     }
 
     override fun resize(id: String, edge: ResizeEdge, dx: Float, dy: Float) {
+        if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         update(id) { w ->
             if (w.state != WindowState.NORMAL) return@update w
             val minW = 260f
@@ -152,7 +159,7 @@ class DesktopWindowManager : WindowManager {
         val maxHeight = workspaceHeight.coerceAtLeast(1f)
 
         _windows.value = _windows.value.map { w ->
-            if (w.id != id || w.state != WindowState.NORMAL) {
+            if (w.id != id || w.state != WindowState.NORMAL || w.protectedByTaskId != null) {
                 w
             } else {
                 val minW = 260f.coerceAtMost(maxWidth)
@@ -226,6 +233,26 @@ class DesktopWindowManager : WindowManager {
             }
         }
     }
+
+    /** Applies task-scoped protection without globally freezing unrelated windows. */
+    fun setTaskProtection(windowIds: Set<String>, taskId: String?, reason: String?) {
+        _windows.value = _windows.value.map { w ->
+            when {
+                taskId == null -> w.copy(protectedByTaskId = null, protectionReason = null)
+                w.protectedByTaskId == taskId && w.id !in windowIds -> w.copy(protectedByTaskId = null, protectionReason = null)
+                taskId != null && w.id in windowIds -> w.copy(protectedByTaskId = taskId, protectionReason = reason)
+                else -> w
+            }
+        }
+    }
+
+    fun clearTaskProtection(taskId: String) {
+        _windows.value = _windows.value.map { w ->
+            if (w.protectedByTaskId == taskId) w.copy(protectedByTaskId = null, protectionReason = null) else w
+        }
+    }
+
+    fun isProtected(id: String): Boolean = _windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null
 
     private fun update(id: String, transform: (DesktopWindow) -> DesktopWindow) {
         _windows.value = _windows.value.map { if (it.id == id) transform(it) else it }
