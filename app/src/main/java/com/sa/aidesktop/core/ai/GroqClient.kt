@@ -179,7 +179,8 @@ class GroqClient(
         for (i in 0 until array.length()) {
             val call = array.optJSONObject(i) ?: continue
             val function = call.optJSONObject("function") ?: continue
-            val name = function.optString("name", "").ifBlank { continue }
+            val name = function.optString("name", "")
+            if (name.isBlank()) continue
             val id = call.optString("id", "call_$i")
             val argumentsRaw = function.optString("arguments", "{}")
             val arguments = try {
