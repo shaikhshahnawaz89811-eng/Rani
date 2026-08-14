@@ -353,8 +353,8 @@ class AndroidBrowserService(
                 })()
             """.trimIndent()
             view.evaluateJavascript(js) { raw ->
-                val parsed = runCatching {
-                    JSONObject(raw.trim('"').replace("\\"", """))
+                val parsed: JSONObject? = runCatching {
+                    JSONObject(unquoteJavascriptResult(raw))
                 }.getOrNull()
                 if (parsed?.optBoolean("ok") != true) {
                     pendingUploads.remove(windowId)
@@ -377,8 +377,11 @@ class AndroidBrowserService(
 
     private suspend fun actionResult(windowId: String, js: String, action: String): BrowserResult<String> {
         val result = evaluate(windowId, js)
-        if (result is BrowserResult.Failure) return result
-        val parsed = runCatching { JSONObject(result.value) }.getOrNull()
+        val rawResult = when (result) {
+            is BrowserResult.Success -> result.value
+            is BrowserResult.Failure -> return result
+        }
+        val parsed = runCatching { JSONObject(rawResult) }.getOrNull()
             ?: return BrowserResult.Failure("Browser returned an invalid $action result.")
         if (!parsed.optBoolean("ok")) return BrowserResult.Failure(parsed.optString("reason", "$action was not performed."))
         // A real action result is followed by the current browser state; no success is inferred

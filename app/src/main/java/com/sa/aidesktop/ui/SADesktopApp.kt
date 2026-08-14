@@ -327,8 +327,8 @@ private val RESIZE_HANDLE_INSET = 12.dp
     val initialFile = remember(files) { files.listDirectory("src").value.orEmpty().firstOrNull { it.kind != FileKind.FOLDER }?.path }
     var tabs by remember(initialFile) { mutableStateOf(initialFile?.let { listOf(it) } ?: emptyList()) }
     var selectedTab by remember(initialFile) { mutableStateOf(initialFile.orEmpty()) }
-    var buffers by remember(initialFile) { mutableStateOf(initialFile?.let { mapOf(it to files.read(it).value.orEmpty()) } ?: emptyMap()) }
-    var savedBuffers by remember { mutableStateOf(buffers) }
+    var buffers by remember(initialFile) { mutableStateOf<Map<String, String>>(initialFile?.let { mapOf(it to files.read(it).value.orEmpty()) } ?: emptyMap()) }
+    var savedBuffers by remember { mutableStateOf<Map<String, String>>(buffers) }
 
     fun openFile(path: String) {
         if (!tabs.contains(path)) tabs = tabs + path
@@ -598,7 +598,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         scope.launch {
             if(isTask){
                 val run=taskEngine.start(p, ProjectContext(projectStructure="MyProject workspace"))
-                msgs.add(AIMessage(formatAgentTaskStatus(run.record),false,"Now"))
+                msgs.add(AIMessage("Agent task started: ${run.record.taskId}",false,"Now"))
                 pending=run.pendingTool
                 pendingTaskId=run.pendingTool?.let { run.record.taskId }
             } else {
