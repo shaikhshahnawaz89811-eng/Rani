@@ -10,8 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 class AndroidSpeechToTextEngine(context:Context,private val language:String="en-IN"):SpeechToText{
-    private val _state=MutableStateFlow(VoiceState());override val state:StateFlow<VoiceState>=_state
-    private val _transcript=MutableStateFlow(""); override val transcript:StateFlow<String>=_transcript
+    private val _state=MutableStateFlow(VoiceState()); override val state: StateFlow<VoiceState> = _state
+    private val _transcript=MutableStateFlow(""); override val transcript: StateFlow<String> = _transcript
     private val recognizer:SpeechRecognizer?=if(SpeechRecognizer.isRecognitionAvailable(context))SpeechRecognizer.createSpeechRecognizer(context.applicationContext)else null
     init{recognizer?.setRecognitionListener(object:RecognitionListener{
         override fun onReadyForSpeech(params:Bundle?) {_state.value=_state.value.copy(listening=true,available=true)}

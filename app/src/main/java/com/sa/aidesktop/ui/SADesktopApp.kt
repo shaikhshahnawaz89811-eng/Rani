@@ -69,8 +69,8 @@ private val ai = OfflineDemoAI()
         windows.filter { it.state != WindowState.MINIMIZED }.sortedBy { it.z }.forEach { w ->
             DesktopWindowView(w, maxWidth.value, maxHeight.value - 58f, files, terminal)
         }
-        Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false })
-        if (startOpen) StartMenu(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it); startOpen = false })
+        Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false }, Modifier.align(Alignment.BottomCenter))
+        if (startOpen) StartMenu(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it); startOpen = false }, modifier = Modifier.align(Alignment.BottomStart))
     }
 }
 
@@ -96,13 +96,13 @@ private val ai = OfflineDemoAI()
     }
 }
 
-@Composable private fun Taskbar(windows: List<DesktopWindow>, start: Boolean, onStart:()->Unit, onOpen:(WindowType)->Unit) {
+@Composable private fun Taskbar(windows: List<DesktopWindow>, start: Boolean, onStart:()->Unit, onOpen:(WindowType)->Unit, modifier: Modifier = Modifier) {
     var now by remember { mutableStateOf(Date()) }
     val context=LocalContext.current
     var battery by remember { mutableIntStateOf(-1) }
     var online by remember { mutableStateOf(false) }
     LaunchedEffect(Unit){ while(kotlinx.coroutines.currentCoroutineContext().isActive){ now=Date(); val bm=context.getSystemService(BatteryManager::class.java); battery=bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1; val cm=context.getSystemService(ConnectivityManager::class.java); online=cm?.activeNetwork?.let{cm.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)}==true; kotlinx.coroutines.delay(1000) } }
-    Row(Modifier.fillMaxWidth().height(58.dp).align(Alignment.BottomCenter).background(Color(0xE80A0B14)).border(1.dp,Color(0x443D78FF)),verticalAlignment=Alignment.CenterVertically){
+    Row(modifier.fillMaxWidth().height(58.dp).background(Color(0xE80A0B14)).border(1.dp,Color(0x443D78FF)),verticalAlignment=Alignment.CenterVertically){
         Spacer(Modifier.width(12.dp)); Surface(Modifier.size(38.dp).clickable(onClick=onStart),RoundedCornerShape(9.dp),color=Color(0xFF3D20A7)){Box(contentAlignment=Alignment.Center){Text("SA",fontWeight=FontWeight.Bold)}};Spacer(Modifier.width(10.dp))
         val pinned=listOf(WindowType.DEVELOPER to Icons.Default.Code,WindowType.AI to Icons.Default.Face,WindowType.TERMINAL to Icons.Default.Terminal,WindowType.GIT to Icons.Default.AccountTree,WindowType.FILES to Icons.Default.Folder,WindowType.BROWSER to Icons.Default.Public)
         pinned.forEach{(type,icon)->val open=windows.lastOrNull{it.type==type};Surface(Modifier.padding(horizontal=2.dp).size(42.dp).clickable{if(type==WindowType.BROWSER) manager.openNew(type) else onOpen(type)},RoundedCornerShape(9.dp),color=if(open?.focused==true)Color(0x443D78FF)else Color.Transparent){Box(contentAlignment=Alignment.Center){Icon(icon,type.name,tint=if(open!=null)Color(0xFFE1E7FF)else Color(0xFF7E89A8),modifier=Modifier.size(20.dp));if(open!=null)Box(Modifier.align(Alignment.BottomCenter).size(16.dp,2.dp).background(Color(0xFF9C5CFF),RoundedCornerShape(2.dp)))}}}
@@ -113,8 +113,8 @@ private val ai = OfflineDemoAI()
     }
 }
 
-@Composable private fun StartMenu(onOpen:(WindowType)->Unit) {
-    Surface(Modifier.align(Alignment.BottomStart).padding(start=10.dp,bottom=64.dp).width(270.dp).height(360.dp), RoundedCornerShape(18.dp), color=Color(0xF20A0B15), shadowElevation=18.dp) {
+@Composable private fun StartMenu(onOpen:(WindowType)->Unit, modifier: Modifier = Modifier) {
+    Surface(modifier.padding(start=10.dp,bottom=64.dp).width(270.dp).height(360.dp), RoundedCornerShape(18.dp), color=Color(0xF20A0B15), shadowElevation=18.dp) {
         Column(Modifier.padding(16.dp)) { Text("SA Desktop",fontSize=20.sp,fontWeight=FontWeight.Bold); Text("AI developer workstation",fontSize=11.sp,color=Color(0xFF9CA7C8)); Spacer(Modifier.height(14.dp)); listOf("Developer Workspace" to WindowType.DEVELOPER,"AI Assistant - Sara" to WindowType.AI,"Terminal" to WindowType.TERMINAL,"Git" to WindowType.GIT,"File Manager" to WindowType.FILES,"Browser" to WindowType.BROWSER,"Settings" to WindowType.SETTINGS).forEach{(t,w)->Text(t,Modifier.fillMaxWidth().clickable{onOpen(w)}.padding(12.dp),color=Color.White)} }
     }
 }
@@ -148,7 +148,7 @@ private val ai = OfflineDemoAI()
                     WindowType.SETTINGS->SettingsWindow()
                     WindowType.BROWSER->BrowserWindow(w.id)
                 }
-                if(w.state==WindowState.NORMAL) ResizeHandle(w, width, height)
+                if(w.state==WindowState.NORMAL) ResizeHandle(w, width, height, screenW, screenH)
             }
         }
     }
@@ -172,7 +172,7 @@ private fun windowDefaults(type: WindowType, screenW: Float, screenH: Float): Wi
     }
 }
 
-@Composable private fun ResizeHandle(w: DesktopWindow, width: Float, height: Float) {
+@Composable private fun ResizeHandle(w: DesktopWindow, width: Float, height: Float, screenW: Float, screenH: Float) {
     val handle = 12.dp
     fun drag(edge: ResizeEdge) = Modifier.pointerInput(w.id, edge) {
         detectDragGestures(
@@ -345,11 +345,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         Row(Modifier.fillMaxWidth().height(34.dp).background(Color(0xFF10121B)),verticalAlignment=Alignment.CenterVertically){
             Text(languageFor(filePath),fontSize=9.sp,color=Color(0xFF7F8CAB),modifier=Modifier.padding(horizontal=9.dp))
             Spacer(Modifier.weight(1f))
-            IconButton({undo()},enabled=historyIndex>0,Modifier.size(28.dp)){Icon(Icons.Default.Undo,"Undo",Modifier.size(15.dp))}
-            IconButton({redo()},enabled=historyIndex<history.lastIndex,Modifier.size(28.dp)){Icon(Icons.Default.Redo,"Redo",Modifier.size(15.dp))}
-            IconButton({showSearch=!showSearch},Modifier.size(28.dp)){Icon(Icons.Default.Search,"Search",Modifier.size(15.dp))}
-            IconButton({showGoto=!showGoto},Modifier.size(28.dp)){Icon(Icons.Default.FormatListNumbered,"Go to line",Modifier.size(15.dp))}
-            IconButton({onSave()},Modifier.size(28.dp)){Icon(Icons.Default.Save,"Save",Modifier.size(15.dp))}
+            IconButton(onClick={undo()}, enabled=historyIndex>0, modifier=Modifier.size(28.dp)){Icon(Icons.Default.Undo,"Undo",Modifier.size(15.dp))}
+            IconButton(onClick={redo()}, enabled=historyIndex<history.lastIndex, modifier=Modifier.size(28.dp)){Icon(Icons.Default.Redo,"Redo",Modifier.size(15.dp))}
+            IconButton(onClick={showSearch=!showSearch}, modifier=Modifier.size(28.dp)){Icon(Icons.Default.Search,"Search",Modifier.size(15.dp))}
+            IconButton(onClick={showGoto=!showGoto}, modifier=Modifier.size(28.dp)){Icon(Icons.Default.FormatListNumbered,"Go to line",Modifier.size(15.dp))}
+            IconButton(onClick={onSave()}, modifier=Modifier.size(28.dp)){Icon(Icons.Default.Save,"Save",Modifier.size(15.dp))}
         }
         if(showSearch) Row(Modifier.fillMaxWidth().padding(5.dp),verticalAlignment=Alignment.CenterVertically){
             TextField(query,{query=it},Modifier.weight(1f),singleLine=true,placeholder={Text("Find",fontSize=10.sp)},colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF151724),unfocusedContainerColor=Color(0xFF151724),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent),textStyle=LocalTextStyle.current.copy(fontSize=10.sp))
@@ -484,7 +484,6 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         Row(Modifier.fillMaxWidth()){Button({scope.launch{busy=true;val paths=status?.changes?.map{it.path}.orEmpty();val a=service.add(paths);if(a is GitResult.Failure)result="Add failed: ${a.error}" else show(service.commit(message));message="";refresh()}},enabled=!busy&&status?.changes?.isNotEmpty()==true,modifier=Modifier.weight(1f)){Text("Commit")};Spacer(Modifier.width(6.dp));Button({confirmPush=true},enabled=!busy&&status?.changes?.isNotEmpty()==true,modifier=Modifier.weight(1f)){Text("Commit & Push")} }
         Row(Modifier.fillMaxWidth()){TextButton({scope.launch{show(service.pull());refresh()}},enabled=!busy){Text("Pull")};TextButton({scope.launch{show(service.fetch());refresh()}},enabled=!busy){Text("Fetch")};TextButton({scope.launch{show(service.diff())}},enabled=!busy){Text("Diff")}}
         if(confirmPush){AlertDialog(onDismissRequest={confirmPush=false},title={Text("Confirm Git Push")},text={Text("Push the current commit to the configured remote? This is a network-sensitive action.")},confirmButton={TextButton(onClick={confirmPush=false;scope.launch{busy=true;val paths=status?.changes?.map{it.path}.orEmpty();val a=service.add(paths);if(a is GitResult.Failure){result="Add failed: ${a.error}"}else{when(val c=service.commit(message)){is GitResult.Success->show(service.push(true));is GitResult.Failure->result="Commit failed: ${c.error}"};message=""};refresh();busy=false}}){Text("Push")}},dismissButton={TextButton(onClick={confirmPush=false}){Text("Cancel")}})}
-        $needle
     }
 }
 
