@@ -4,6 +4,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+
+kotlin {
+    jvmToolchain(21)
+}
+
+android {
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+}
+
 android { namespace = "com.sa.aidesktop"; compileSdk = 35
     defaultConfig { applicationId = "com.sa.aidesktop"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0" }
     buildFeatures { compose = true; buildConfig = true }
