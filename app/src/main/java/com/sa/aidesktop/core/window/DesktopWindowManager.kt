@@ -186,8 +186,21 @@ class DesktopWindowManager : WindowManager {
                     else -> w.height
                 }
 
-                newWidth = newWidth.coerceIn(minW, maxWidth)
-                newHeight = newHeight.coerceIn(minH, maxHeight)
+                // Bound the new size by whichever edge stays anchored, so the
+                // opposite side can never be pushed past the workspace margin.
+                val maxWidthAllowed = if (leftEdge) {
+                    (w.x + w.width - 4f).coerceAtLeast(minW)
+                } else {
+                    (maxWidth - w.x - 4f).coerceAtLeast(minW)
+                }
+                val maxHeightAllowed = if (topEdge) {
+                    (w.y + w.height - 4f).coerceAtLeast(minH)
+                } else {
+                    (maxHeight - w.y - 4f).coerceAtLeast(minH)
+                }
+
+                newWidth = newWidth.coerceIn(minW, maxWidthAllowed.coerceAtMost(maxWidth))
+                newHeight = newHeight.coerceIn(minH, maxHeightAllowed.coerceAtMost(maxHeight))
 
                 var newX = if (leftEdge) {
                     w.x + (w.width - newWidth)

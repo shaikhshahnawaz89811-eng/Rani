@@ -111,8 +111,6 @@ class WindowManagerTest {
 
         val w = manager.windows.single()
 
-        println("DEBUG WINDOW: x=${w.x}, width=${w.width}, right=${w.x + w.width}, y=${w.y}, height=${w.height}")
-
         assertTrue(w.x >= 4f)
         assertTrue(w.x + w.width <= 500.01f)
         assertTrue(w.width <= 500f)
