@@ -1,0 +1,156 @@
+package com.sa.aidesktop.core.window
+
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.max
+
+class DesktopWindowManager : WindowManager {
+    private val _windows = MutableStateFlow<List<DesktopWindow>>(emptyList())
+    override val windows: List<DesktopWindow> get() = _windows.value
+    val state: StateFlow<List<DesktopWindow>> = _windows.asStateFlow()
+    private var z = 0
+
+    private fun title(type: WindowType) = when (type) {
+        WindowType.DEVELOPER -> "Developer Workspace"
+        WindowType.AI -> "AI Assistant - Sara"
+        WindowType.TERMINAL -> "Terminal"
+        WindowType.GIT -> "Git"
+        WindowType.FILES -> "File Manager"
+        WindowType.SETTINGS -> "Settings"
+        WindowType.BROWSER -> "Browser"
+    }
+
+    override fun open(type: WindowType) {
+        val existing = _windows.value.firstOrNull { it.type == type }
+        if (existing != null) {
+            if (existing.state == WindowState.MINIMIZED) restore(existing.id) else focus(existing.id)
+            return
+        }
+        z += 1
+        val id = type.name.lowercase()
+        val next = DesktopWindow(id = id, type = type, title = title(type), z = z, focused = true)
+        _windows.value = _windows.value.map { it.copy(focused = false) } + next
+    }
+
+    override fun openNew(type: WindowType): String {
+        val base = type.name.lowercase()
+        var index = 1
+        var id = base
+        while (_windows.value.any { it.id == id }) { index++; id = "$base-$index" }
+        z += 1
+        val displayTitle = if (type == WindowType.BROWSER) "Browser $index" else title(type) + " $index"
+        val next = DesktopWindow(id = id, type = type, title = displayTitle, z = z, focused = true)
+        _windows.value = _windows.value.map { it.copy(focused = false) } + next
+        return id
+    }
+
+    override fun clampToWorkspace(width: Float, height: Float) {
+        val maxWidth = width.coerceAtLeast(1f)
+        val maxHeight = height.coerceAtLeast(1f)
+        _windows.value = _windows.value.map { w ->
+            if (w.state == WindowState.MAXIMIZED || w.state == WindowState.MINIMIZED) w
+            else {
+                val newWidth = w.width.coerceIn(220f.coerceAtMost(maxWidth), maxWidth)
+                val newHeight = w.height.coerceIn(160f.coerceAtMost(maxHeight), maxHeight)
+                val maxX = (maxWidth - newWidth - 4f).coerceAtLeast(4f)
+                val maxY = (maxHeight - newHeight - 4f).coerceAtLeast(4f)
+                w.copy(width = newWidth, height = newHeight, x = w.x.coerceIn(4f, maxX), y = w.y.coerceIn(4f, maxY))
+            }
+        }
+    }
+
+    override fun close(id: String) {
+        val remaining = _windows.value.filterNot { it.id == id }
+        _windows.value = focusTop(remaining)
+    }
+
+    override fun minimize(id: String) {
+        val updated = _windows.value.map { if (it.id == id) it.copy(state = WindowState.MINIMIZED, focused = false) else it.copy(focused = false) }
+        _windows.value = focusTop(updated)
+    }
+
+    override fun maximize(id: String) {
+        z += 1
+        _windows.value = _windows.value.map {
+            when {
+                it.id != id -> it.copy(focused = false)
+                it.state == WindowState.MAXIMIZED -> it.copy(focused = true, z = z)
+                else -> it.copy(state = WindowState.MAXIMIZED, focused = true, z = z, restoreBounds = WindowBounds(it.x, it.y, it.width, it.height))
+            }
+        }
+    }
+
+    override fun restore(id: String) {
+        z += 1
+        _windows.value = _windows.value.map {
+            if (it.id != id) it.copy(focused = false)
+            else {
+                val b = it.restoreBounds
+                it.copy(
+                    state = WindowState.NORMAL,
+                    focused = true,
+                    z = z,
+                    x = b?.x ?: it.x,
+                    y = b?.y ?: it.y,
+                    width = b?.width ?: it.width,
+                    height = b?.height ?: it.height,
+                    restoreBounds = null
+                )
+            }
+        }
+    }
+
+    override fun focus(id: String) {
+        val target = _windows.value.firstOrNull { it.id == id } ?: return
+        if (target.state == WindowState.MINIMIZED) return
+        z += 1
+        _windows.value = _windows.value.map { it.copy(focused = it.id == id, z = if (it.id == id) z else it.z) }
+    }
+
+    override fun move(id: String, dx: Float, dy: Float) {
+        update(id) { it.copy(x = it.x + dx, y = it.y + dy) }
+    }
+
+    override fun resize(id: String, dw: Float, dh: Float) {
+        resize(id, ResizeEdge.BOTTOM_RIGHT, dw, dh)
+    }
+
+    override fun initializeBounds(id: String, bounds: WindowBounds) {
+        _windows.value = _windows.value.map {
+            if (it.id == id && it.width <= 0f && it.height <= 0f) it.copy(x = bounds.x, y = bounds.y, width = bounds.width, height = bounds.height) else it
+        }
+    }
+
+    override fun resize(id: String, edge: ResizeEdge, dx: Float, dy: Float) {
+        update(id) { w ->
+            if (w.state != WindowState.NORMAL) return@update w
+            val minW = 260f
+            val minH = 180f
+            val leftEdge = edge == ResizeEdge.LEFT || edge == ResizeEdge.TOP_LEFT || edge == ResizeEdge.BOTTOM_LEFT
+            val topEdge = edge == ResizeEdge.TOP || edge == ResizeEdge.TOP_LEFT || edge == ResizeEdge.TOP_RIGHT
+            val rawW = if (leftEdge) w.width - dx else if (edge == ResizeEdge.RIGHT || edge == ResizeEdge.TOP_RIGHT || edge == ResizeEdge.BOTTOM_RIGHT) w.width + dx else w.width
+            val rawH = if (topEdge) w.height - dy else if (edge == ResizeEdge.BOTTOM || edge == ResizeEdge.BOTTOM_LEFT || edge == ResizeEdge.BOTTOM_RIGHT) w.height + dy else w.height
+            val newW = max(minW, rawW)
+            val newH = max(minH, rawH)
+            val newX = if (leftEdge) w.x + (w.width - newW) else w.x
+            val newY = if (topEdge) w.y + (w.height - newH) else w.y
+            w.copy(x = newX, y = newY, width = newW, height = newH)
+        }
+    }
+
+    /** Keeps a window inside the current desktop work area after a resize/rotation. */
+    fun resizeWithinWorkspace(id: String, edge: ResizeEdge, dx: Float, dy: Float, workspaceWidth: Float, workspaceHeight: Float) {
+        resize(id, edge, dx, dy)
+        clampToWorkspace(workspaceWidth, workspaceHeight)
+    }
+
+    private fun update(id: String, transform: (DesktopWindow) -> DesktopWindow) {
+        _windows.value = _windows.value.map { if (it.id == id) transform(it) else it }
+    }
+
+    private fun focusTop(list: List<DesktopWindow>): List<DesktopWindow> {
+        val top = list.filter { it.state != WindowState.MINIMIZED }.maxByOrNull { it.z }?.id ?: return list.map { it.copy(focused = false) }
+        return list.map { it.copy(focused = it.id == top) }
+    }
+}
