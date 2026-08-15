@@ -1,5 +1,6 @@
 package com.sa.aidesktop.core.terminal
 
+import com.sa.aidesktop.core.python.EmbeddedPythonEngine
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -21,6 +22,13 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
             return TerminalResult("Command blocked by workspace security policy: path escapes the workspace.", 126)
         }
         val cwd = resolveDirectory(workingDirectory) ?: return TerminalResult("Invalid working directory.", 1)
+        pythonScriptFileOrNull(executable, tokens.drop(1), cwd)?.let { scriptFile ->
+            return if (EmbeddedPythonEngine.isAvailable) {
+                EmbeddedPythonEngine.runFile(scriptFile.path, cwd.path)
+            } else {
+                TerminalResult("Embedded Python engine is still starting up. Try again in a moment.", 1)
+            }
+        }
         return try {
             val p = ProcessBuilder(tokens).directory(cwd).redirectErrorStream(true).start()
             processRef.set(p)
@@ -50,6 +58,17 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
         return args.filterNot { it == "--" || it.startsWith("-") }.any { token ->
             token.startsWith("/") || token.startsWith("\\") || token.split('/', '\\').any { it == ".." }
         }
+    }
+
+    /** Returns the .py file to run with the embedded engine, or null if this isn't a plain
+     *  `python`/`python3 <file>.py` invocation (e.g. no args, flags only, non-.py target). */
+    private fun pythonScriptFileOrNull(executable: String, args: List<String>, cwd: File): File? {
+        if (executable != "python" && executable != "python3") return null
+        val scriptArg = args.firstOrNull { !it.startsWith("-") } ?: return null
+        if (!scriptArg.endsWith(".py")) return null
+        val candidate = File(scriptArg).let { if (it.isAbsolute) it else File(cwd, scriptArg) }.canonicalFile
+        val inside = candidate.path == workspace.canonicalPath || candidate.path.startsWith(workspace.canonicalPath + File.separator)
+        return candidate.takeIf { inside && it.isFile }
     }
 
     private fun resolveDirectory(path: String): File? {

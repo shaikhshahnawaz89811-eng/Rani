@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.chaquo.python")
 }
 
 
@@ -29,7 +30,13 @@ android {
 }
 
 android { namespace = "com.sa.aidesktop"; compileSdk = 35
-    defaultConfig { applicationId = "com.sa.aidesktop"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a" } }
+    defaultConfig {
+        applicationId = "com.sa.aidesktop"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a"; abiFilters += "x86_64" } // x86_64 added so the CI emulator (which is x86_64) can run the embedded-Python instrumented test; arm64-v8a (real devices) is unchanged
+        // Chaquopy: which CPython to bundle. No pip packages are pre-installed — user scripts
+        // that only need the standard library (the python main.py case) work out of the box.
+        // Add python.pip.install("<package>") here later if a script needs a third-party lib.
+        python { version = "3.11" }
+    }
     buildFeatures { compose = true; buildConfig = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
@@ -61,4 +68,9 @@ dependencies {
     // org.json classes throw "not mocked" by default, so this test-only artifact is added
     // purely so GroqClientTest can exercise real JSON parsing. It never ships in the app.
     testImplementation("org.json:json:20240303")
+    // Instrumented-test deps for EmbeddedPythonEngineInstrumentedTest: the embedded interpreter
+    // needs a real Android runtime/APK context to start, so it cannot be exercised by a local
+    // JVM unit test under app/src/test — it runs under app/src/androidTest on a device/emulator.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
