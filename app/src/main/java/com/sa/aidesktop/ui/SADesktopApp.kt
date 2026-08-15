@@ -646,7 +646,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     val msgs = remember {
         mutableStateListOf(
             AIMessage(
-                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured as the online primary; real local GGUF is the fallback." else "No Groq key is configured; real local GGUF is used when installed."}",
+                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured — I run entirely on Groq." else "No Groq API key is configured yet. Add it in Settings to use Sara."}",
                 false,
                 "Now"
             ),
@@ -757,7 +757,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             // had an explicit (readable) color and is unchanged.
             Column(Modifier.padding(start=9.dp).weight(1f)){
                 Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF))
-                Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Offline Local LLM";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->"Offline model missing";null->if(settingsStore.hasApiKey())"Groq configured" else "Offline model missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
+                Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
                 Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
             }
             Text(if(busy) "Thinking…" else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
@@ -1211,7 +1211,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         // Phase 1: real Groq provider configuration. The key is stored only through SecureStore
         // (AndroidKeyStore-backed AES/GCM) and is never shown back in full once saved.
         Text("AI Provider — Groq (online)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — local model will be used if installed",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF79DFA0) else Color(0xFFFFC36B),modifier=Modifier.padding(top=6.dp))
+        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — Sara cannot chat until this is set",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF79DFA0) else Color(0xFFFFC36B),modifier=Modifier.padding(top=6.dp))
         OutlinedTextField(
             value=apiKeyInput,onValueChange={apiKeyInput=it},
             label={Text("Groq API key",fontSize=10.sp)},
@@ -1237,11 +1237,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             savedNotice="Settings saved."
         },modifier=Modifier.padding(top=6.dp)){Text("Save provider settings",fontSize=10.sp)}
         savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF79DFA0),modifier=Modifier.padding(top=4.dp)) }
-        Text("Values are clamped to safe ranges automatically. Groq remains online; the local model is used only when configured and available.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text("Values are clamped to safe ranges automatically. Sara runs entirely on Groq — chat, tools and coding tasks all require this key.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
         Divider(Modifier.padding(top=14.dp))
 
         Text("AI Provider — Offline Local LLM",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text("This build does not bundle an on-device inference runtime yet, so a configured GGUF model is validated but cannot run locally — Groq (cloud) is used instead until a real runtime is added.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
+        Text("This build does not bundle an on-device inference runtime yet, so a configured GGUF model is validated but cannot run locally. Sara now uses Groq only for chat — this section is for managing a stored model file, nothing here is used automatically.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
         Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFFFC36B) else Color(0xFF79DFA0),modifier=Modifier.padding(top=6.dp))
         Row(Modifier.padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
             TextButton(onClick={ if(!localBusy) modelPicker.launch(arrayOf("application/octet-stream","application/*","*/*")) },enabled=!localBusy){Text(if(localBusy) "Importing…" else "Select GGUF model",fontSize=10.sp)}

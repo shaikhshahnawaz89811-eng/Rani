@@ -1,9 +1,10 @@
 package com.sa.aidesktop.core.ai
 
 /**
- * Explicit command bridge for the compact offline model. It deliberately handles only commands
- * whose intent and parameters can be extracted safely without asking the tiny model to invent a
- * function call. Ambiguous requests continue to the real local model.
+ * Deterministic command shortcut used when Groq has no key or a Groq call fails. It deliberately
+ * handles only commands whose intent and parameters can be extracted safely by pattern matching
+ * — no model inference involved. Ambiguous requests are not guessed at; the router reports the
+ * real reason Groq could not be used instead.
  */
 object LocalIntentRouter {
     private val expressionOnly = Regex("""^[\s\d()+\-*/.]+$""")

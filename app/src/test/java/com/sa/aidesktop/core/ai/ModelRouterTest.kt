@@ -35,7 +35,7 @@ class ModelRouterTest {
         assertEquals(0, engine.callCount)
     }
 
-    @Test fun noApiKeyUsesLocalPathAndReportsUnavailableWhenNoModelExists() = runBlocking {
+    @Test fun noApiKeyReturnsHonestFailureWithoutTouchingOfflineModel() = runBlocking {
         val engine = FakeEngine(GroqResult.Success(GroqChatResult("should not be used")))
         val offline = UnavailableOfflineAI()
         val router = ModelRouter(engine, offline, hasApiKey = { false }, settingsProvider = { GroqSettings() }, toolRegistry = registry())
@@ -43,6 +43,9 @@ class ModelRouterTest {
         assertTrue(result is AIResult.Failure)
         assertEquals(0, engine.callCount)
         assertEquals(RouterTier.OFFLINE_LOCAL_UNAVAILABLE, router.currentStatus().lastTier)
+        val error = (result as AIResult.Failure).error
+        assertTrue(error is AIError.ModelUnavailable)
+        assertTrue((error as AIError.ModelUnavailable).message.contains("Groq API key"))
     }
 
     @Test fun successfulGroqCallIsUsedAsIs() = runBlocking {
@@ -54,11 +57,16 @@ class ModelRouterTest {
         assertNull(router.currentStatus().lastError)
     }
 
-    @Test fun groqFailureFallsBackToOfflineAndRecordsRealError() = runBlocking {
+    @Test fun groqFailureReturnsTheRealGroqErrorInsteadOfAnUnrelatedOfflineError() = runBlocking {
         val engine = FakeEngine(GroqResult.Failure(GroqError.Timeout("Groq request timed out after 30000ms")))
         val router = ModelRouter(engine, UnavailableOfflineAI(), hasApiKey = { true }, settingsProvider = { GroqSettings() }, toolRegistry = registry())
         val result = router.chat(AIRequest("hello"))
         assertTrue(result is AIResult.Failure)
+        // The returned failure must carry the real Groq error, not the unrelated
+        // "no local GGUF model configured" message from the (now unused) offline engine.
+        val error = (result as AIResult.Failure).error
+        assertTrue(error is AIError.ModelUnavailable)
+        assertTrue((error as AIError.ModelUnavailable).message.contains("timed out"))
         assertEquals(RouterTier.OFFLINE_LOCAL_UNAVAILABLE, router.currentStatus().lastTier)
         assertTrue(router.currentStatus().lastError!!.contains("timed out"))
         assertEquals(1, router.currentStatus().consecutiveOnlineFailures)

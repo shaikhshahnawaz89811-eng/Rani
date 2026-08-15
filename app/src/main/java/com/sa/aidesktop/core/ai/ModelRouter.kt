@@ -3,10 +3,12 @@ package com.sa.aidesktop.core.ai
 /**
  * Single AI router for the desktop.
  *
- * Groq is the full reasoning/tool provider when configured. A genuine local GGUF model is used
- * when Groq is not configured or when an online request fails. Local tool requests that can be
- * identified without model function-calling are handled by LocalIntentRouter using the same real
- * ToolRegistry and ToolExecutionGateway; everything else goes to the local model honestly.
+ * Groq is the only reasoning/tool provider. Local tool requests that can be identified without
+ * model function-calling (e.g. "2+2", device time/date) are handled deterministically by
+ * LocalIntentRouter using the same real ToolRegistry and ToolExecutionGateway — that is plain
+ * tool matching, not an offline AI model. Everything else requires Groq; if no API key is set or
+ * a Groq call fails, the router returns the real reason honestly instead of silently handing the
+ * request to an unconfigured local GGUF model.
  */
 enum class RouterTier { ONLINE_GROQ, OFFLINE_LOCAL, OFFLINE_LOCAL_UNAVAILABLE }
 
@@ -46,28 +48,22 @@ class ModelRouter(
 
         if (!hasApiKey()) {
             status = status.copy(
-                lastTier = if (offline is LocalLlamaEngine) RouterTier.OFFLINE_LOCAL
-                else RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
+                lastTier = RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
                 lastError = "No Groq API key configured."
             )
 
-            // The compact local model is not a reliable function-calling model. Handle explicit,
-            // unambiguous local commands through real tools first instead of letting the model
-            // invent a tool result.
+            // Groq is the only AI brain. Explicit, unambiguous local commands can still be
+            // resolved deterministically through real tools (no model inference involved), but
+            // anything that needs real reasoning honestly requires a Groq key — it is never
+            // silently handed to the offline/local model.
             val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
             if (localIntent != null) {
                 return executeLocalIntent(localIntent, request)
             }
 
-            val localResult = offline.chat(request)
-            if (localResult is AIResult.Success) {
-                return AIResult.Success(
-                    localResult.value.copy(
-                        toolTrace = localResult.value.toolTrace.ifEmpty { listOf("LOCAL MODEL") }
-                    )
-                )
-            }
-            return localResult
+            return AIResult.Failure(
+                AIError.ModelUnavailable("Groq API key is not configured. Add your Groq API key in Settings to use Sara.")
+            )
         }
 
         val descriptors = toolRegistry.all().map { it.toDescriptor() }
@@ -92,28 +88,30 @@ class ModelRouter(
                 )
             ) {
                 is GroqResult.Failure -> {
+                    val realError = describe(result.error)
                     status = status.copy(
-                        lastTier = if (offline is LocalLlamaEngine) RouterTier.OFFLINE_LOCAL
-                        else RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
-                        lastError = describe(result.error),
+                        lastTier = RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
+                        lastError = realError,
                         consecutiveOnlineFailures = status.consecutiveOnlineFailures + 1
                     )
+                    // Deterministic tool commands can still resolve without any model. Anything
+                    // else must surface the real Groq failure — it is never masked behind an
+                    // unrelated "no local GGUF model configured" message.
                     val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
-                    val fallback = if (localIntent != null) {
-                        executeLocalIntent(localIntent, request)
-                    } else {
-                        offline.chat(request)
-                    }
-                    return if (fallback is AIResult.Success) {
-                        AIResult.Success(
-                            fallback.value.copy(
-                                toolTrace = listOf("GROQ FAILED → LOCAL FALLBACK: ${describe(result.error)}") +
-                                    fallback.value.toolTrace
+                    if (localIntent != null) {
+                        val fallback = executeLocalIntent(localIntent, request)
+                        return if (fallback is AIResult.Success) {
+                            AIResult.Success(
+                                fallback.value.copy(
+                                    toolTrace = listOf("GROQ ERROR: $realError (handled locally by tool match)") +
+                                        fallback.value.toolTrace
+                                )
                             )
-                        )
-                    } else {
-                        fallback
+                        } else {
+                            fallback
+                        }
                     }
+                    return AIResult.Failure(AIError.ModelUnavailable("Groq request failed: $realError"))
                 }
 
                 is GroqResult.Success -> {
@@ -237,7 +235,7 @@ class ModelRouter(
         request: AIRequest
     ): AIResult<AIResponse> {
         val tool = toolRegistry.find(intent.toolId)
-            ?: return offline.chat(request)
+            ?: return AIResult.Failure(AIError.ModelUnavailable("Tool '${intent.toolId}' is not registered."))
         val gateway = ToolExecutionGateway(toolRegistry)
         return if (intent.risk == ToolRisk.READ_ONLY) {
             when (val execution = gateway.execute(intent, approved = true)) {
