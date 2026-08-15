@@ -16,6 +16,14 @@ private class FakeEngine(private val result: GroqResult) : GroqChatEngine {
     }
 }
 
+
+private class FakeEngineSequence(private val results: List<GroqResult>) : GroqChatEngine {
+    private var index = 0
+    override suspend fun chat(prompt: String, settings: GroqSettings, systemPrompt: String?, tools: List<ToolDescriptor>): GroqResult {
+        return results[(index++).coerceAtMost(results.lastIndex)]
+    }
+}
+
 class ModelRouterTest {
     private fun registry() = ToolRegistry(listOf(ReadFileTool(InMemoryProjectFileService())))
 
@@ -57,16 +65,21 @@ class ModelRouterTest {
     }
 
     @Test fun toolCallFromGroqIsMappedToARealRegisteredToolRequest() = runBlocking {
-        val engine = FakeEngine(GroqResult.Success(GroqChatResult(
-            text = "",
-            toolCalls = listOf(GroqToolCall("call_1", "read_file", mapOf("path" to "src/main.py")))
-        )))
-        val router = ModelRouter(engine, UnavailableOfflineAI(), hasApiKey = { true }, settingsProvider = { GroqSettings() }, toolRegistry = registry())
+        val files = InMemoryProjectFileService()
+        files.write("src/main.py", "print('hello')")
+        val registry = ToolRegistry(listOf(ReadFileTool(files)))
+        val engine = FakeEngineSequence(listOf(
+            GroqResult.Success(GroqChatResult(
+                text = "",
+                toolCalls = listOf(GroqToolCall("call_1", "read_file", mapOf("path" to "src/main.py")))
+            )),
+            GroqResult.Success(GroqChatResult("The file contains print('hello')."))
+        ))
+        val router = ModelRouter(engine, UnavailableOfflineAI(), hasApiKey = { true }, settingsProvider = { GroqSettings() }, toolRegistry = registry)
         val result = router.chat(AIRequest("read main.py")) as AIResult.Success
-        val toolRequest = result.value.toolRequests.single()
-        assertEquals("read_file", toolRequest.toolId)
-        assertEquals("src/main.py", toolRequest.input["path"])
-        assertEquals(ToolRisk.READ_ONLY, toolRequest.risk)
+        assertEquals("The file contains print('hello').", result.value.text)
+        assertTrue(result.value.toolRequests.isEmpty())
+        assertEquals(RouterTier.ONLINE_GROQ, router.currentStatus().lastTier)
     }
 
     @Test fun unknownToolNameFromGroqIsDroppedNotFabricated() = runBlocking {

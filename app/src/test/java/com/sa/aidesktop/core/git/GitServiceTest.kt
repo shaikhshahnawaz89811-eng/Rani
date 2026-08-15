@@ -10,7 +10,7 @@ class GitServiceTest {
         val calls = mutableListOf<List<String>>()
         override suspend fun run(args: List<String>): GitCommandResult {
             calls += args
-            return responses[args.joinToString(" ")] ?: GitCommandResult(0, "", "")
+            return responses["git " + args.joinToString(" ")] ?: GitCommandResult(0, "", "")
         }
     }
 
