@@ -23,6 +23,7 @@ data class RouterStatus(
 )
 
 private const val MAX_TOOL_ROUNDS = 6
+private const val TOOL_OUTPUT_CHAR_LIMIT = 8_000
 
 private const val SARA_SYSTEM_PROMPT =
     "You are Sara, a real developer assistant embedded in SA Desktop. " +
@@ -223,7 +224,14 @@ class ModelRouter(
                         val requestForTool = ToolRequest(tool.id, call.arguments, tool.risk)
                         when (val execution = gateway.execute(requestForTool, approved = true)) {
                             is AIResult.Success -> {
-                                val output = execution.value.output.take(18_000)
+                                // Rule 20 (minimal-necessary-payload): this was take(18_000) — on a
+                                // free-tier Groq key (low tokens-per-minute), one or two large tool
+                                // results (e.g. a big file read) could burn most of the per-minute
+                                // budget on a single turn and push the very next message into a 429.
+                                // Trimmed to a smaller default; still real, untruncated-looking
+                                // output for the vast majority of tool calls, just not a worst-case
+                                // 18k-character dump every time.
+                                val output = execution.value.output.take(TOOL_OUTPUT_CHAR_LIMIT)
                                 trace += "TOOL ${tool.id} ✓"
                                 messages += GroqMessage(
                                     role = "tool",
@@ -328,7 +336,10 @@ class ModelRouter(
     private fun describe(error: GroqError): String = when (error) {
         is GroqError.MissingApiKey -> error.message
         is GroqError.InvalidApiKey -> "Invalid Groq API key: ${error.message}"
-        is GroqError.RateLimited -> "Groq rate limit: ${error.message}"
+        // The real Groq message is kept in full (Rule 10: never hide the actual error) — only a
+        // plain-language reason is added in front, since a free Groq API key has a low
+        // requests/tokens-per-minute cap and this is by far the most common cause a user hits it.
+        is GroqError.RateLimited -> "Groq rate limit reached (common on a free API key — wait a few seconds and try again): ${error.message}"
         is GroqError.ServiceUnavailable -> "Groq unavailable (HTTP ${error.code}): ${error.message}"
         is GroqError.Http -> "Groq HTTP ${error.code}: ${error.message}"
         is GroqError.PayloadTooLarge -> "Groq request was too large: ${error.message}"

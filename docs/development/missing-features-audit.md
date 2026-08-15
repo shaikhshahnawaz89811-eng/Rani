@@ -2,9 +2,16 @@
 
 ## Fixed in this audit
 - `browser.open`/back/forward/reload/stop/scroll/focus no longer require manual approval —
-  they only view/navigate a page, so they run like any other read-only tool. `click`, `type`,
-  `select`, `check`, `upload`, and `download` still require approval since those can submit
-  forms, enter data, or move a real file.
+  they only view/navigate a page, so they run like any other read-only tool. `upload` and
+  `download` still require approval since those move a real file.
+  **CORRECTION (later change, not part of this audit pass):** `BrowserTools.kt`'s
+  `riskForElementAction` subsequently downgraded `click`, `type`, `select`, and `check` to
+  `ToolRisk.READ_ONLY` as well — the code comment there marks this "TEMPORARY (per explicit
+  user request)" so simple "play this" style requests wouldn't stop for approval. This line was
+  never updated to match, so it no longer describes what the app actually does: the AI can now
+  click any button, type into any field, and toggle any checkbox/radio on any open webpage
+  without a human approval step. `ai_web.type_message`/`ai_web.send_message` (the AI-website
+  composer/send tools) are unaffected and still require approval.
 - AI/Terminal/Git windows can no longer be resized below the minimum height their own header +
   toolbar + input row need, which previously made input fields/suggestions overlap when a
   window was shrunk a lot.

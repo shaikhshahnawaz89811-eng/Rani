@@ -248,7 +248,16 @@ class CommandGitService(
             return if (r.ok) GitResult.Success(r.stdout.lines().filter(String::isNotBlank)) else mapFailure(r)
         }
         if (!validateBranch(name)) return GitResult.Failure(GitError.Validation("Invalid branch name."))
-        return when (val r = unit(backend.run(listOf("switch", "-c", "--", name)))) { is GitResult.Success -> GitResult.Success(emptyList()); is GitResult.Failure -> r }
+        val switched = backend.run(listOf("switch", "-c", "--", name))
+        if (!switched.ok) return mapFailure(switched)
+        // BUG FIX (Rule 17 endpoint-correctness): this used to report GitResult.Success(emptyList())
+        // on branch creation — the chain "completed" (Rule 1) but the reported result was always
+        // blank, so a caller could never tell the branch genuinely got created vs. silently no-op'd.
+        // Re-read the real branch list after the switch so the endpoint reflects verified state
+        // (the new branch actually present), not an assumed/empty placeholder.
+        val list = backend.run(listOf("branch", "--list", "--format=%(refname:short)"))
+        return if (list.ok) GitResult.Success(list.stdout.lines().filter(String::isNotBlank))
+        else GitResult.Success(listOf(name)) // switch already succeeded; don't fail the op over a secondary read
     }
 
     override suspend fun checkout(name: String): GitResult<Unit> {

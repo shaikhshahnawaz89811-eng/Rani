@@ -462,6 +462,58 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     append(code.substring(last))
 }
 
+/** Rule 13 (cleaner-viewer helper) + Rule 15 (small single-purpose sub-helper): lightweight,
+ *  dependency-free markdown for AI chat bubbles ONLY — fenced ```code``` blocks (reusing
+ *  [highlightCode] so colors match the editor), **bold**, `inline code`, and "- "/"* " bullet
+ *  lines. This is not a real markdown/HTML parser: anything it doesn't recognise is emitted as
+ *  plain text unchanged, so no message content is ever lost, reordered, or altered — only
+ *  presentation is added on top of the exact same text. */
+private fun renderChatMarkdown(text: String): AnnotatedString = buildAnnotatedString {
+    val codeFence = Regex("```[a-zA-Z0-9]*\\n?([\\s\\S]*?)```")
+    var cursor = 0
+    codeFence.findAll(text).forEach { block ->
+        appendMarkdownLines(text.substring(cursor, block.range.first))
+        val body = block.groupValues[1].trimEnd('\n')
+        withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color(0xFF1B1D2B), color = Color(0xFFE7EAF7))) {
+            append(" ")
+            append(highlightCode(body))
+            append(" ")
+        }
+        cursor = block.range.last + 1
+    }
+    appendMarkdownLines(text.substring(cursor))
+}
+
+private fun AnnotatedString.Builder.appendMarkdownLines(segment: String) {
+    if (segment.isEmpty()) return
+    segment.lines().forEachIndexed { index, rawLine ->
+        if (index > 0) append("\n")
+        val trimmed = rawLine.trimStart()
+        val bulleted = trimmed.startsWith("- ") || trimmed.startsWith("* ")
+        if (bulleted) append("•  ")
+        val body = if (bulleted) trimmed.removePrefix("- ").removePrefix("* ") else rawLine
+        appendMarkdownInline(body)
+    }
+}
+
+private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
+    val inline = Regex("\\*\\*([^*]+)\\*\\*|`([^`]+)`")
+    var last = 0
+    inline.findAll(line).forEach { m ->
+        append(line.substring(last, m.range.first))
+        val bold = m.groupValues[1]
+        if (bold.isNotEmpty()) {
+            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(bold) }
+        } else {
+            withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color(0xFF20222F), color = Color(0xFFFFC978))) {
+                append(m.groupValues[2])
+            }
+        }
+        last = m.range.last + 1
+    }
+    append(line.substring(last))
+}
+
 @Composable private fun CodeEditor(code:String,filePath:String,onChange:(String)->Unit,onSave:()->Unit){
     var query by remember { mutableStateOf("") }
     var replace by remember { mutableStateOf("") }
@@ -606,6 +658,10 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         )
     }
     val service: AIService = router
+    // Hoisted here (was previously collected a second time inside the header Row only) so the
+    // same live activity label can also drive the in-chat status bubble below — one collection,
+    // two places that read it (Rule 21: no duplicate/extra state collection).
+    val activity by router.activityStatus.collectAsState()
     val taskEngine = remember(router, gateway, taskStore, tools) {
         TaskEngine(router, gateway, taskStore).also { engine ->
             // Task controls are registered after the engine exists, but the router/gateway hold the
@@ -694,6 +750,14 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     }
 
     fun clearChat() {
+        // BUG FIX (Rule 3/17 — "clear" must fully reset related state, not just the UI list):
+        // clearing chat previously reset only local message/approval state. If an autonomous
+        // agent task was mid-flight (e.g. WAITING_FOR_APPROVAL), TaskEngine's persisted record
+        // survived untouched, so the *next* "banao/fix karo" request would silently resume that
+        // stale old task via reconcileAndResume instead of starting the fresh one the user just
+        // typed — the chat looked cleared but old task context wasn't. Cancel any active/resumable
+        // task as part of clearing, so "clear chat" genuinely means a fresh start.
+        if (taskEngine.current() != null) taskEngine.cancel()
         msgs.clear()
         msgs.add(
             AIMessage(
@@ -801,7 +865,6 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
                 Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
             }
-            val activity by router.activityStatus.collectAsState()
             Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
             IconButton(onClick = { clearChat() }, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Clear chat", tint = Color(0xFF8996B5), modifier = Modifier.size(16.dp))
@@ -823,13 +886,39 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 }
             }
         }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){
+        val chatScroll = rememberScrollState()
+        // BUG FIX (Rule 1/17 endpoint-correctness: chat looked "cut off"/reply appeared to
+        // vanish after a resize or a new turn): the message list scrolled, but nothing ever
+        // drove it to the newest message, so a fresh reply — or the same scroll offset surviving
+        // a window resize — could render below the visible viewport. The user had to notice and
+        // manually drag to see it, which read as the chat being cut/broken. Auto-scroll to the
+        // latest content whenever the message count or the busy/typing-bubble state changes,
+        // exactly like a normal chat app; this only moves the scroll position, it never touches
+        // AI/tool logic above.
+        LaunchedEffect(msgs.size, busy) {
+            if (chatScroll.maxValue > 0) chatScroll.animateScrollTo(chatScroll.maxValue)
+        }
+        Column(Modifier.weight(1f).verticalScroll(chatScroll).padding(10.dp)){
             // BUG FIX (screenshot: chat bubble text almost black/unreadable on dark background):
             // Text() previously had no explicit color, so it inherited LocalContentColor from the
             // surrounding theme/Surface instead of a color chosen for these specific bubble
             // backgrounds. Explicit light colors are set per bubble (user vs assistant) so both
             // remain readable, including multiline responses, without touching the AI logic above.
-            msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(m.text,Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}}}}
+            msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(renderChatMarkdown(m.text),Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}}}
+            // Rule 13: a visible per-type "typing" bubble (not just the small header word) while a
+            // turn is in flight — real activityStatus label (Thinking…/Coding…/Browsing…/Git…/
+            // Running…) set from the actual tool ids about to run (ModelRouter.activityLabel),
+            // never a guessed/generic word.
+            if(busy) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Start){
+                Surface(Modifier.padding(vertical=4.dp),RoundedCornerShape(12.dp),color=Color(0xFF171820)){
+                    Row(Modifier.padding(horizontal=12.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){
+                        CircularProgressIndicator(Modifier.size(11.dp),color=Color(0xFFFFC36B),strokeWidth=1.5.dp)
+                        Spacer(Modifier.width(7.dp))
+                        Text(activity,fontSize=11.sp,color=Color(0xFFFFC36B))
+                    }
+                }
+            }
+        }
         pending?.let { request ->
             Surface(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -1025,11 +1114,16 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             // are now supplied for both focused and unfocused state, plus the typed text style,
             // cursor, and text-selection highlight, so entry and placeholder are always visible.
             // Single-line behavior, voice/mic/send buttons, and busy/send logic are unchanged.
+            // Chat-window fix: this was singleLine=true, so any message longer than the box's
+            // width was invisible/cramped (couldn't see what you typed, Claude/ChatGPT-style
+            // inputs grow instead). minLines/maxLines lets it grow up to 6 lines as you type and
+            // shrink back down; Enter still inserts a newline (send stays on the explicit Send
+            // button below, unchanged) so nothing about submit behavior changes.
             TextField(
                 input,{input=it},Modifier.weight(1f),
                 textStyle=LocalTextStyle.current.copy(color=Color(0xFFF2F4FF),fontSize=12.sp),
                 placeholder={Text("Ask Sara about your project...",fontSize=11.sp,color=Color(0xFF8993B8))},
-                singleLine=true,enabled=!busy,
+                minLines=1,maxLines=6,enabled=!busy,
                 colors=TextFieldDefaults.colors(
                     focusedContainerColor=Color(0xFF11121A),unfocusedContainerColor=Color(0xFF11121A),
                     disabledContainerColor=Color(0xFF11121A),
@@ -1065,8 +1159,16 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     // "mini" window is fixed separately in DesktopWindowView (content is now inset from the
     // resize-only strip), which is what could make taps near "$" behave unpredictably after
     // rotation shrank the window.
+    val termScroll = rememberScrollState()
+    // BUG FIX (Rule 1/17: terminal output looked "cut off" after a command): same class of bug
+    // as the AI chat window above — new output lines never drove the scroll position, so a
+    // command's real result could land below the visible area. Auto-scroll to the latest line
+    // whenever output grows; this only moves scroll, it never touches command execution.
+    LaunchedEffect(out.size) {
+        if (termScroll.maxValue > 0) termScroll.animateScrollTo(termScroll.maxValue)
+    }
     Column(Modifier.fillMaxSize().background(Color(0xFF050609))){
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
+        Column(Modifier.weight(1f).verticalScroll(termScroll).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
         Row(Modifier.padding(8.dp),verticalAlignment=Alignment.CenterVertically){
             Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B))
             // BUG FIX (screenshot: terminal typed input invisible next to "$"): the transparent
@@ -1216,7 +1318,26 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     var items by remember { mutableStateOf(files.listDirectory("").value.orEmpty()) }
     var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf<ProjectFile?>(null) }
-    fun refresh(path:String=currentPath){ items = files.listDirectory(path).value.orEmpty(); selected=null }
+    // Rename UI state + last-operation error. FileService.rename()/delete() already existed and
+    // already worked for both files and folders (AndroidProjectFileService/
+    // InMemoryProjectFileService) — Rename just had no button wired to it in this window (Rule 4:
+    // dead-end at the UI layer), and delete()'s FileResult was previously discarded, so a failed
+    // delete (e.g. a non-empty folder) silently did nothing with no explanation (Rule 4:
+    // silent-fail). Both are fixed here without touching the file-service logic itself.
+    var renaming by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
+    var opError by remember { mutableStateOf<String?>(null) }
+    fun refresh(path:String=currentPath){ items = files.listDirectory(path).value.orEmpty(); selected=null; renaming=false }
+    fun describeFileError(e: FileError): String = when(e){
+        FileError.InvalidPath -> "Invalid path."
+        FileError.NotFound -> "Not found."
+        FileError.AlreadyExists -> "A file or folder with that name already exists."
+        FileError.NotDirectory -> "Not a folder."
+        FileError.DirectoryNotEmpty -> "Folder is not empty — delete its contents first."
+        FileError.IsDirectory -> "That is a folder."
+        is FileError.Access -> e.message
+        is FileError.InvalidName -> e.message
+    }
     val shown = if(query.isBlank()) items else files.search(query).value.orEmpty()
     Column(Modifier.fillMaxSize().padding(10.dp)) {
         Row(Modifier.fillMaxWidth().height(34.dp),verticalAlignment=Alignment.CenterVertically){
@@ -1230,7 +1351,25 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             TextButton(onClick={val name="new_file.txt";files.createFile(if(currentPath.isEmpty())name else "$currentPath/$name");refresh()}){Text("+ File",fontSize=10.sp)}
             TextButton(onClick={val name="new_folder";files.createFolder(if(currentPath.isEmpty())name else "$currentPath/$name");refresh()}){Text("+ Folder",fontSize=10.sp)}
         }
-        if(selected!=null) Row(Modifier.fillMaxWidth().padding(vertical=3.dp),verticalAlignment=Alignment.CenterVertically){Text("Selected: ${selected!!.name}",Modifier.weight(1f),fontSize=10.sp,color=Color(0xFF9CA8C5));TextButton(onClick={files.delete(selected!!.path);refresh()}){Text("Delete",fontSize=10.sp)}}
+        if(selected!=null && !renaming) Row(Modifier.fillMaxWidth().padding(vertical=3.dp),verticalAlignment=Alignment.CenterVertically){
+            Text("Selected: ${selected!!.name}",Modifier.weight(1f),fontSize=10.sp,color=Color(0xFF9CA8C5))
+            TextButton(onClick={renameText=selected!!.name;opError=null;renaming=true}){Text("Rename",fontSize=10.sp)}
+            TextButton(onClick={
+                val r=files.delete(selected!!.path)
+                opError = r.error?.let{ "Delete failed: ${describeFileError(it)}" }
+                refresh()
+            }){Text("Delete",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+        }
+        if(selected!=null && renaming) Row(Modifier.fillMaxWidth().padding(vertical=3.dp),verticalAlignment=Alignment.CenterVertically){
+            TextField(renameText,{renameText=it},Modifier.weight(1f),singleLine=true,colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF11131C),unfocusedContainerColor=Color(0xFF11131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
+            TextButton(onClick={
+                val r=files.rename(selected!!.path,renameText.trim())
+                opError = r.error?.let{ "Rename failed: ${describeFileError(it)}" }
+                refresh()
+            },enabled=renameText.isNotBlank()){Text("Save",fontSize=10.sp)}
+            TextButton(onClick={renaming=false;opError=null}){Text("Cancel",fontSize=10.sp)}
+        }
+        if(opError!=null) Text(opError!!,fontSize=9.sp,color=Color(0xFFFF7A9A),modifier=Modifier.padding(bottom=3.dp))
         Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
             shown.forEach { f ->
                 Surface(Modifier.padding(6.dp).size(92.dp,86.dp).clickable{

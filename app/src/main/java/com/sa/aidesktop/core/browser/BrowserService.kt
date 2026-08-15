@@ -185,7 +185,12 @@ class AndroidBrowserService(
     }
 
     suspend fun forward(windowId: String) = onMain(windowId) {
-        val v = views[windowId] ?: return@onMain BrowserResult.Failure("No forward page in browser history.")
+        // BUG FIX (Rule 10 correctness — copy-paste from back()): when the WebView itself wasn't
+        // registered/ready yet, this reported "No forward page in browser history" — the wrong
+        // diagnosis; that message is only correct once a real view exists and genuinely has no
+        // forward entry. Missing-view now reports the same "not ready" message as every other
+        // action here (back/reload/stop/click/type/...).
+        val v = views[windowId] ?: return@onMain BrowserResult.Failure("Browser window is not ready.")
         if (!v.canGoForward()) return@onMain BrowserResult.Failure("No next page in browser history.")
         v.goForward(); BrowserResult.Success(Unit)
     }

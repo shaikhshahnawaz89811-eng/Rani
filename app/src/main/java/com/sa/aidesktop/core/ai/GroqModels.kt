@@ -30,7 +30,10 @@ data class GroqSettings(
     companion object {
         const val DEFAULT_MODEL = "llama-3.3-70b-versatile"
         const val DEFAULT_TIMEOUT_MS = 30_000
-        const val DEFAULT_RETRY_LIMIT = 2
+        // Was 2. A free-tier Groq key hits 429s often enough that 2 retries (each honoring
+        // Groq's own real Retry-After, capped at MAX_RATE_LIMIT_WAIT_MS in GroqClient) frequently
+        // wasn't enough to get past a burst; user settings can still override this.
+        const val DEFAULT_RETRY_LIMIT = 3
         const val MIN_TIMEOUT_MS = 1_000
         const val MAX_TIMEOUT_MS = 120_000
         const val MAX_RETRY_LIMIT = 5

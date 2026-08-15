@@ -46,7 +46,15 @@ class BuildProjectTool(private val terminal:TerminalService):AITool {
     override val parameterHints=mapOf("command" to "Actual project build or test command discovered from project configuration")
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
         val command=input["command"]?.trim().orEmpty(); if(command.isBlank())return AIResult.Failure(AIError.InvalidRequest("command is required"))
-        val r=terminal.execute(command); val output=("$command\n${r.output}").takeLast(24_000)
-        return if(r.exitCode==0) AIResult.Success(ToolResult("BUILD/TEST SUCCESS\n$output")) else AIResult.Failure(AIError.Execution("BUILD/TEST FAILED (exit ${r.exitCode})\n$output"))
+        // BUG FIX (Rule 4/10 correctness): terminal.execute() is a plain blocking call (it can
+        // block for the shell backend's whole timeout on a real build/test run). Every other
+        // caller of it (see CoreAITools.TerminalRunTool) dispatches onto Dispatchers.IO first;
+        // this one previously ran it directly on whatever coroutine dispatcher the AI chat/task
+        // loop is on, risking a UI stall on the one command most likely to be slow.
+        // BUG FIX (Rule 17): a successful build/test run can genuinely write output files, so it
+        // must report changed=true like TerminalRunTool does, not the silent default false.
+        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { terminal.execute(command) }
+        val output=("$command\n${r.output}").takeLast(24_000)
+        return if(r.exitCode==0) AIResult.Success(ToolResult("BUILD/TEST SUCCESS\n$output", changed = true)) else AIResult.Failure(AIError.Execution("BUILD/TEST FAILED (exit ${r.exitCode})\n$output"))
     }
 }

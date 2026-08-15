@@ -2,6 +2,14 @@ package com.sa.aidesktop.core.github
 
 import com.sa.aidesktop.core.ai.*
 
+// BUG FIX (Rule 1/17 endpoint-correctness): TaskEngine reads ToolResult.changed to build
+// AgentTaskRecord.changedFiles for an autonomous task (see TaskEngine.kt). Every Git/GitHub
+// tool below that genuinely mutates the real repository/account (init, add, commit, push,
+// pull, clone, checkout, merge, branch-create, create_repository) previously left `changed`
+// at its default `false`, so a task summary could report zero changes while Git had actually
+// committed/pushed/created things. `git.fetch` is left as-is on purpose — it only updates
+// remote-tracking refs, not tracked working files, so it isn't a "changed files" event.
+
 class GitStatusTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
     override val id = "git.status"
     override val description = "Inspect the real Git repository status, branch, staged/unstaged changes and ahead/behind state."
@@ -56,7 +64,7 @@ class GitInitTool(private val git: com.sa.aidesktop.core.git.GitService): AITool
     override val description = "Initialize a real Git repository in the controlled project workspace."
     override val risk = ToolRisk.WRITE
     override val parameterHints = emptyMap<String, String>()
-    override suspend fun execute(input: Map<String, String>) = git.init().toAi("git.init") { "Git repository initialized." }
+    override suspend fun execute(input: Map<String, String>) = git.init().toAi("git.init", changed = true) { "Git repository initialized." }
 }
 
 class GitAddTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -66,7 +74,7 @@ class GitAddTool(private val git: com.sa.aidesktop.core.git.GitService): AITool 
     override val parameterHints = mapOf("paths" to "Comma-separated repository-relative paths to stage")
     override suspend fun execute(input: Map<String, String>): AIResult<ToolResult> {
         val paths = input["paths"].orEmpty().split(',').map(String::trim).filter(String::isNotBlank)
-        return git.add(paths).toAi("git.add") { "Staged ${paths.size} selected path(s)." }
+        return git.add(paths).toAi("git.add", changed = true) { "Staged ${paths.size} selected path(s)." }
     }
 }
 
@@ -76,7 +84,7 @@ class GitCommitTool(private val git: com.sa.aidesktop.core.git.GitService): AITo
     override val risk = ToolRisk.WRITE
     override val parameterHints = mapOf("message" to "Meaningful commit message based on actual staged changes")
     override suspend fun execute(input: Map<String, String>) =
-        git.commit(input["message"].orEmpty()).toAi("git.commit") { it }
+        git.commit(input["message"].orEmpty()).toAi("git.commit", changed = true) { it }
 }
 
 class GitFetchTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -104,7 +112,7 @@ class GitPushTool(private val git: com.sa.aidesktop.core.git.GitService): AITool
     )
     override suspend fun execute(input: Map<String, String>) =
         git.push(input["remote"], input["branch"], input["confirmed"]?.toBooleanStrictOrNull() == true)
-            .toAi("git.push") { it }
+            .toAi("git.push", changed = true) { it }
 }
 
 class GitPullTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -118,7 +126,7 @@ class GitPullTool(private val git: com.sa.aidesktop.core.git.GitService): AITool
     )
     override suspend fun execute(input: Map<String, String>) =
         git.pull(input["remote"], input["branch"], input["confirmed"]?.toBooleanStrictOrNull() == true)
-            .toAi("git.pull") { it }
+            .toAi("git.pull", changed = true) { it }
 }
 
 class GitCloneTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -127,7 +135,7 @@ class GitCloneTool(private val git: com.sa.aidesktop.core.git.GitService): AIToo
     override val risk = ToolRisk.WRITE
     override val parameterHints = mapOf("url" to "HTTPS/SSH Git URL", "destination" to "Workspace-relative empty destination directory")
     override suspend fun execute(input: Map<String, String>) =
-        git.clone(input["url"].orEmpty(), input["destination"].orEmpty()).toAi("git.clone") { "Repository cloned successfully." }
+        git.clone(input["url"].orEmpty(), input["destination"].orEmpty()).toAi("git.clone", changed = true) { "Repository cloned successfully." }
 }
 
 class GitBranchTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -137,7 +145,8 @@ class GitBranchTool(private val git: com.sa.aidesktop.core.git.GitService): AITo
     override val parameterHints = mapOf("name" to "Optional branch name; omit to list branches")
     override val requiredParameters = emptySet<String>()
     override suspend fun execute(input: Map<String, String>) =
-        git.branch(input["name"]?.trim()?.takeIf(String::isNotBlank)).toAi("git.branch") { it.joinToString("\n") }
+        git.branch(input["name"]?.trim()?.takeIf(String::isNotBlank))
+            .toAi("git.branch", changed = input["name"]?.trim().isNullOrBlank().not()) { it.joinToString("\n") }
 }
 
 class GitCheckoutTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -146,7 +155,7 @@ class GitCheckoutTool(private val git: com.sa.aidesktop.core.git.GitService): AI
     override val risk = ToolRisk.WRITE
     override val parameterHints = mapOf("name" to "Existing branch name")
     override suspend fun execute(input: Map<String, String>) =
-        git.checkout(input["name"].orEmpty()).toAi("git.checkout") { "Checked out ${input["name"]}." }
+        git.checkout(input["name"].orEmpty()).toAi("git.checkout", changed = true) { "Checked out ${input["name"]}." }
 }
 
 class GitMergeTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
@@ -155,7 +164,7 @@ class GitMergeTool(private val git: com.sa.aidesktop.core.git.GitService): AIToo
     override val risk = ToolRisk.WRITE
     override val parameterHints = mapOf("name" to "Existing branch to merge")
     override suspend fun execute(input: Map<String, String>) =
-        git.merge(input["name"].orEmpty()).toAi("git.merge") { it }
+        git.merge(input["name"].orEmpty()).toAi("git.merge", changed = true) { it }
 }
 
 class GitHubAccountStatusTool(private val accounts: GitHubAccountStore): AITool {
@@ -186,7 +195,7 @@ class GitHubCreateRepositoryTool(private val api: GitHubApiClient): AITool {
     override val requiredParameters = setOf("name")
     override suspend fun execute(input: Map<String, String>) =
         api.createRepository(input["name"].orEmpty(), input["description"].orEmpty(), input["private"]?.toBooleanStrictOrNull() ?: true)
-            .toAi("github.create_repository") { "${it.fullName}\nclone=${it.cloneUrl}\nurl=${it.htmlUrl}" }
+            .toAi("github.create_repository", changed = true) { "${it.fullName}\nclone=${it.cloneUrl}\nurl=${it.htmlUrl}" }
 }
 
 private inline fun <T,R> com.sa.aidesktop.core.git.GitResult<T>.toAi(
