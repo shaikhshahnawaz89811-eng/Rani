@@ -32,13 +32,22 @@ android {
 android { namespace = "com.sa.aidesktop"; compileSdk = 35
     defaultConfig {
         applicationId = "com.sa.aidesktop"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a"; abiFilters += "x86_64" } // x86_64 added so the CI emulator (which is x86_64) can run the embedded-Python instrumented test; arm64-v8a (real devices) is unchanged
-        // Chaquopy: which CPython to bundle. No pip packages are pre-installed — user scripts
-        // that only need the standard library (the python main.py case) work out of the box.
-        // Add python.pip.install("<package>") here later if a script needs a third-party lib.
-        python { version = "3.11" }
     }
     buildFeatures { compose = true; buildConfig = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+}
+
+// Chaquopy: which CPython to bundle. No pip packages are pre-installed — user scripts that
+// only need the standard library (the `python main.py` case) work out of the box. Add
+// pip { install("<package>") } inside defaultConfig here later if a script needs one.
+// NOTE: as of Chaquopy 15.0+, this is its own top-level block, separate from android{} —
+// the old `android { defaultConfig { python { ... } } }` syntax was Groovy-only and no
+// longer resolves under Kotlin DSL (that mismatch was the exact cause of the
+// "Unresolved reference: python" build failure).
+chaquopy {
+    defaultConfig {
+        version = "3.11"
+    }
 }
 
 dependencies {
