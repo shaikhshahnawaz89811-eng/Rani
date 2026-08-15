@@ -22,12 +22,14 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
             return TerminalResult("Command blocked by workspace security policy: path escapes the workspace.", 126)
         }
         val cwd = resolveDirectory(workingDirectory) ?: return TerminalResult("Invalid working directory.", 1)
-        pythonScriptFileOrNull(executable, tokens.drop(1), cwd)?.let { scriptFile ->
-            return if (EmbeddedPythonEngine.isAvailable) {
-                EmbeddedPythonEngine.runFile(scriptFile.path, cwd.path)
-            } else {
-                TerminalResult("Embedded Python engine is still starting up. Try again in a moment.", 1)
-            }
+        // There is no real system `python`/`python3` binary on Android — the embedded Chaquopy
+        // engine is the ONLY thing that can ever run a script here. Handling these two executables
+        // fully in-branch (instead of falling through to the raw ProcessBuilder below on a miss)
+        // means every failure mode gets a real, specific message instead of the raw-process path
+        // always dying with a confusing native "Cannot run program python" OS error (Rule 17:
+        // an endpoint that exists but is never correct is still a bug).
+        if (executable == "python" || executable == "python3") {
+            return runEmbeddedPython(tokens.drop(1), cwd)
         }
         return try {
             val p = ProcessBuilder(tokens).directory(cwd).redirectErrorStream(true).start()
@@ -60,15 +62,38 @@ class EmbeddedShellBackend(private val workspace: File) : ShellBackend {
         }
     }
 
-    /** Returns the .py file to run with the embedded engine, or null if this isn't a plain
-     *  `python`/`python3 <file>.py` invocation (e.g. no args, flags only, non-.py target). */
-    private fun pythonScriptFileOrNull(executable: String, args: List<String>, cwd: File): File? {
-        if (executable != "python" && executable != "python3") return null
-        val scriptArg = args.firstOrNull { !it.startsWith("-") } ?: return null
-        if (!scriptArg.endsWith(".py")) return null
+    /** Sub-helper (Rule 15): the ONLY path that ever runs `python`/`python3` — every case below
+     *  returns a specific, honest [TerminalResult] instead of silently falling through to a raw
+     *  native process exec that can never succeed on this platform. */
+    private fun runEmbeddedPython(args: List<String>, cwd: File): TerminalResult {
+        val scriptArg = args.firstOrNull { !it.startsWith("-") }
+            ?: return TerminalResult(
+                "Embedded Python does not support the interactive REPL. Run it as: python <file>.py",
+                1
+            )
+        if (!scriptArg.endsWith(".py")) {
+            return TerminalResult("Embedded Python can only run .py files, got: $scriptArg", 1)
+        }
         val candidate = File(scriptArg).let { if (it.isAbsolute) it else File(cwd, scriptArg) }.canonicalFile
         val inside = candidate.path == workspace.canonicalPath || candidate.path.startsWith(workspace.canonicalPath + File.separator)
-        return candidate.takeIf { inside && it.isFile }
+        if (!inside) {
+            return TerminalResult("Command blocked by workspace security policy: path escapes the workspace.", 126)
+        }
+        if (!candidate.isFile) {
+            // This is the exact case the user hit: they saved the file under a different name/
+            // extension (e.g. new_file.txt) than what they ran (python new_file.py). Say so
+            // clearly instead of letting it fall through to a confusing native process error.
+            return TerminalResult(
+                "python: can't open file '$scriptArg': [Errno 2] No such file or directory. " +
+                    "Check the file was saved with this exact name (including .py) in the workspace.",
+                2
+            )
+        }
+        return if (EmbeddedPythonEngine.isAvailable) {
+            EmbeddedPythonEngine.runFile(candidate.path, cwd.path)
+        } else {
+            TerminalResult("Embedded Python engine is still starting up. Try again in a moment.", 1)
+        }
     }
 
     private fun resolveDirectory(path: String): File? {
