@@ -62,7 +62,21 @@ class AndroidBrowserService(
             view.settings.domStorageEnabled = true
             view.settings.loadsImagesAutomatically = true
             view.settings.useWideViewPort = true
-            view.settings.loadWithOverviewMode = true
+            // A real desktop User-Agent is the actual requirement here — every site (YouTube
+            // included) must be asked for its desktop layout, not just have Android's default
+            // mobile UA hidden from callers. Read fresh once per WebView, applied before the first
+            // navigation so the very first page load already gets the desktop response.
+            view.settings.userAgentString = DESKTOP_USER_AGENT
+            // loadWithOverviewMode/setInitialScale are a mobile-page-fit-to-screen trick: with a
+            // real desktop UA, sites already lay themselves out for a wide viewport, so forcing an
+            // "overview" zoom-to-fit on top of that is what produced the reported bug (a blank
+            // strip down the left edge with the real page content shifted right). Desktop pages
+            // should render at their natural width/scale instead.
+            view.settings.loadWithOverviewMode = false
+            view.settings.textZoom = 100
+            view.settings.setSupportZoom(true)
+            view.settings.builtInZoomControls = true
+            view.settings.displayZoomControls = false
             view.settings.allowFileAccess = false
             view.settings.allowContentAccess = true
             view.webViewClient = object : WebViewClient() {
@@ -521,5 +535,13 @@ class AndroidBrowserService(
                 else -> "PENDING:${it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))}"
             }
         }
+    }
+
+    companion object {
+        // A real Chrome-on-desktop-Linux UA string — the same shape every desktop browser sends —
+        // so sites serve their actual desktop layout/markup instead of a mobile one.
+        const val DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/124.0.0.0 Safari/537.36"
     }
 }

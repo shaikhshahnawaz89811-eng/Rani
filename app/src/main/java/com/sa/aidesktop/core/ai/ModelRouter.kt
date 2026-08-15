@@ -1,5 +1,9 @@
 package com.sa.aidesktop.core.ai
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 /**
  * Single AI router for the desktop.
  *
@@ -41,6 +45,13 @@ class ModelRouter(
 ) : AIService {
 
     @Volatile private var status = RouterStatus(null, null, 0)
+
+    // A single generic "Thinking…" label for the whole call hid what Sara was actually doing
+    // (writing code vs opening a browser vs running a shell command). This reflects the real
+    // tool(s) about to run each round, read directly from the tool ids being executed — never a
+    // guess — so the chat header can show it live instead of one static word for everything.
+    private val _activityStatus = MutableStateFlow("Thinking…")
+    val activityStatus: StateFlow<String> = _activityStatus.asStateFlow()
 
     fun currentStatus(): RouterStatus = status
 
@@ -87,8 +98,10 @@ class ModelRouter(
         messages += GroqMessage("user", request.prompt)
 
         val trace = mutableListOf<String>()
+        _activityStatus.value = "Thinking…"
 
         repeat(MAX_TOOL_ROUNDS) {
+            _activityStatus.value = "Thinking…"
             when (
                 val result = engine.chatConversation(
                     messages = messages.toList(),
@@ -137,6 +150,9 @@ class ModelRouter(
                     }
                     val unknownCalls = response.toolCalls.filter { call ->
                         toolRegistry.find(call.name) == null
+                    }
+                    if (knownRequests.isNotEmpty()) {
+                        _activityStatus.value = activityLabel(knownRequests.map { it.toolId })
                     }
 
                     if (response.toolCalls.isNotEmpty()) {
@@ -287,6 +303,20 @@ class ModelRouter(
 
     private fun AITool.toDescriptor(): ToolDescriptor =
         ToolDescriptor(id, description, parameterHints, requiredParameters)
+
+    /** Maps the tool ids about to run this round to a short live status label. Real prefixes only
+     *  (browser./git./github./ai_web., the exact coding/file/terminal ids) — never a guess when a
+     *  tool id doesn't match anything known. */
+    private fun activityLabel(toolIds: List<String>): String = when {
+        toolIds.any { it.startsWith("browser.") || it.startsWith("ai_web.") } -> "Browsing…"
+        toolIds.any { it.startsWith("git.") || it.startsWith("github.") } -> "Git…"
+        toolIds.any { it == "run_terminal" || it == "project.build" } -> "Running…"
+        toolIds.any {
+            it in setOf("read_file", "write_file", "search_files", "list_files") ||
+                it.startsWith("project.")
+        } -> "Coding…"
+        else -> "Thinking…"
+    }
 
     private fun describeAiError(error: AIError): String = when (error) {
         is AIError.InvalidRequest -> error.message

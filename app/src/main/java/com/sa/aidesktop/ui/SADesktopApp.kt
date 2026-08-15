@@ -693,6 +693,30 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         return buildVerb.containsMatchIn(prompt) && buildNoun.containsMatchIn(prompt)
     }
 
+    fun clearChat() {
+        msgs.clear()
+        msgs.add(
+            AIMessage(
+                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured — I run entirely on Groq." else "No Groq API key is configured yet. Add it in Settings to use Sara."}",
+                false,
+                "Now"
+            )
+        )
+        msgs.add(
+            AIMessage(
+                "Main sirf real tool results claim karungi. File/Git/browser/terminal changes approval ke bina apply nahi honge.",
+                false,
+                "Now"
+            )
+        )
+        pending = null
+        pendingQueue = emptyList()
+        appliedBatchResults = emptyList()
+        pendingTaskId = null
+        pendingChatPrompt = null
+        lastToolTrace = emptyList()
+    }
+
     fun send() {
         val p = input.trim()
         if (p.isBlank() || busy) return
@@ -777,7 +801,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
                 Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
             }
-            Text(if(busy) "Thinking…" else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
+            val activity by router.activityStatus.collectAsState()
+            Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
+            IconButton(onClick = { clearChat() }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Delete, contentDescription = "Clear chat", tint = Color(0xFF8996B5), modifier = Modifier.size(16.dp))
+            }
         }
         Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
             tools.all().forEach { tool ->

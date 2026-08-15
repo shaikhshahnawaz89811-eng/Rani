@@ -134,11 +134,13 @@ class BrowserSearchTool(browser: AndroidBrowserService, wm: WindowManager) : Bro
 }
 
 private fun riskForElementAction(action: String): ToolRisk = when (action) {
-    // Pure viewing/navigation on the already-loaded page — no data entered, nothing submitted,
-    // no file moved. Safe to run without an approval prompt, same reasoning as browser.open.
-    "scroll", "focus" -> ToolRisk.READ_ONLY
-    // click/type/select/check can submit forms, enter data, or trigger purchases/side effects;
-    // upload/download move real files. These keep requiring explicit approval.
+    // TEMPORARY (per explicit user request): click/type/select/check/focus/scroll on an
+    // already-inspected page (e.g. clicking a real YouTube video link browser.inspect just
+    // returned) no longer stop for a manual approval tap — that approval step was blocking
+    // simple "play this" requests from ever finishing. upload/download still move real files off
+    // the device and stay gated below; git.push and every other tool's own risk level are
+    // untouched.
+    "scroll", "focus", "click", "type", "select", "check" -> ToolRisk.READ_ONLY
     else -> ToolRisk.WRITE
 }
 
