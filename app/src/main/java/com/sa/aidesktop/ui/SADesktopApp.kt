@@ -70,6 +70,21 @@ private val manager = DesktopWindowManager()
 // portrait and landscape, instead of drifting out of sync if only one call site were edited.
 private const val TASKBAR_HEIGHT = 50f
 
+/**
+ * Formats the current autonomous-agent state for the chat UI. Kept at file scope so the
+ * send()/continuation handlers can resolve it reliably during Kotlin compilation.
+ */
+private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
+    append("Task ${r.taskId.take(8)}: ${r.state}. ")
+    when {
+        r.waitingReason != null -> append(r.waitingReason)
+        r.finalResult.isNotBlank() -> append(r.finalResult)
+        r.lastToolResult.isNotBlank() -> append(r.lastToolResult)
+        r.currentOperation.isNotBlank() -> append(r.currentOperation)
+        else -> append("Task state saved; next step will reconcile real state.")
+    }
+}
+
 
 
 @Composable fun SADesktopApp() {
@@ -733,10 +748,6 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         }
     }
 
-    fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
-        append("Task ${r.taskId.take(8)}: ${r.state}. ")
-        if(r.waitingReason != null) append(r.waitingReason) else if(r.finalResult.isNotBlank()) append(r.finalResult) else append(r.lastToolResult.ifBlank { r.currentOperation.ifBlank { "Task state saved; next step will reconcile real state." } })
-    }
     Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
         Row(Modifier.fillMaxWidth().height(52.dp).background(Color(0xFF10121D)).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
             Surface(Modifier.size(34.dp),RoundedCornerShape(10.dp),color=Color(0xFF4D1A78)){androidx.compose.foundation.Image(painterResource(R.drawable.sara_avatar),contentDescription="Sara",modifier=Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),contentScale=androidx.compose.ui.layout.ContentScale.Crop)}
