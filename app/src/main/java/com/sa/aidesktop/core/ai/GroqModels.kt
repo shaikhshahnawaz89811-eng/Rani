@@ -57,7 +57,12 @@ data class GroqChatResult(
     val text: String,
     val toolCalls: List<GroqToolCall> = emptyList(),
     val usage: GroqUsage? = null,
-    val finishReason: String? = null
+    val finishReason: String? = null,
+    /** True only when this result was reconstructed locally from a Groq 400
+     *  "tool call validation failed" error whose message embedded a real tool name + JSON
+     *  arguments glued together (see GroqClient.recoverMalformedToolCall). Lets callers show an
+     *  honest trace note instead of silently pretending Groq returned this normally. */
+    val recoveredFromMalformedToolCall: Boolean = false
 )
 
 /** Real error taxonomy mapped from actual Groq/HTTP failure modes. No field here is guessed:

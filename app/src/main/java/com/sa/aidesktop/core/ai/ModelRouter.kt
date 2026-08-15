@@ -126,6 +126,10 @@ class ModelRouter(
 
                 is GroqResult.Success -> {
                     val response = result.value
+                    if (response.recoveredFromMalformedToolCall) {
+                        trace += "NOTE: Groq's model sent a malformed tool call (arguments glued onto the name); " +
+                            "auto-recovered the real tool + arguments from Groq's error text."
+                    }
                     val knownRequests = response.toolCalls.mapNotNull { call ->
                         toolRegistry.find(call.name)?.let { tool ->
                             ToolRequest(tool.id, call.arguments, tool.risk)

@@ -1,6 +1,7 @@
 package com.sa.aidesktop.core.ai
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -249,6 +250,36 @@ class GroqClientTest {
 
     @Test fun unrelatedHttp400StaysGenericHttpError() = runBlocking {
         val url = startServer { request -> respond(request, 400, """{"error":{"message":"Invalid request: bad JSON schema"}}""") }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
+        assertTrue((result as GroqResult.Failure).error is GroqError.Http)
+    }
+
+    @Test fun malformedToolCallNameIsRecoveredFromGroq400() = runBlocking {
+        val rawMessage = "tool call validation failed: attempted to call tool " +
+            "'browser.open{\"url\": \"https://www.youtube.com/results?search_query=sad+songs\", " +
+            "\"window_id\": \"music\"}' which was not in request.tools"
+        val url = startServer { request ->
+            respond(request, 400, """{"error":{"message":${JSONObject.quote(rawMessage)}}}""")
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("sad song lagao", GroqSettings(retryLimit = 0), null, emptyList())
+        val success = result as GroqResult.Success
+        assertTrue(success.value.recoveredFromMalformedToolCall)
+        assertEquals(1, success.value.toolCalls.size)
+        val call = success.value.toolCalls.first()
+        assertEquals("browser.open", call.name)
+        assertEquals("https://www.youtube.com/results?search_query=sad+songs", call.arguments["url"])
+        assertEquals("music", call.arguments["window_id"])
+    }
+
+    @Test fun http400WithoutEmbeddedJsonStaysGenericHttpError() = runBlocking {
+        // Same wording, but the model's bogus name has no '{' at all — nothing safe to recover,
+        // so this must fall through to a normal Http failure instead of guessing.
+        val rawMessage = "tool call validation failed: attempted to call tool 'made_up_tool' which was not in request.tools"
+        val url = startServer { request ->
+            respond(request, 400, """{"error":{"message":${JSONObject.quote(rawMessage)}}}""")
+        }
         val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
         val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
         assertTrue((result as GroqResult.Failure).error is GroqError.Http)

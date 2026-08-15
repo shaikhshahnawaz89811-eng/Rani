@@ -261,6 +261,27 @@ class GroqClient(
             ) {
                 return GroqResult.Failure(GroqError.PayloadTooLarge(bodyMessage))
             }
+            // Some Groq-hosted models occasionally malform their own function call — instead of
+            // putting arguments in the "arguments" field, they glue the JSON straight onto the
+            // function name, e.g. name = browser.open{"url":"...","window_id":"music"}. Groq's
+            // server rejects that as HTTP 400 before we ever see a normal choices[] response,
+            // since the literal string isn't a declared tool. The real tool name and real
+            // arguments are still fully present in Groq's own error text, so recover them instead
+            // of surfacing a dead-end error — this is read from the actual error message, never
+            // guessed or invented.
+            if (response.statusCode == 400 && bodyMessage != null) {
+                recoverMalformedToolCall(bodyMessage)?.let { call ->
+                    return GroqResult.Success(
+                        GroqChatResult(
+                            text = "",
+                            toolCalls = listOf(call),
+                            usage = null,
+                            finishReason = "tool_calls",
+                            recoveredFromMalformedToolCall = true
+                        )
+                    )
+                }
+            }
             return GroqResult.Failure(
                 GroqError.Http(
                     response.statusCode,
@@ -313,17 +334,38 @@ class GroqClient(
             if (call == null || function == null || name.isBlank()) continue
             val id = call.optString("id", "call_$i")
             val argumentsRaw = function.optString("arguments", "{}")
-            val arguments = try {
-                val obj = JSONObject(argumentsRaw)
-                obj.keys().asSequence().associateWith { key ->
-                    obj.optString(key, "")
-                }
-            } catch (e: JSONException) {
-                emptyMap()
-            }
+            val arguments = parseArgumentsObject(argumentsRaw)
             result.add(GroqToolCall(id, name, arguments))
         }
         return result
+    }
+
+    private fun parseArgumentsObject(raw: String): Map<String, String> = try {
+        val obj = JSONObject(raw)
+        obj.keys().asSequence().associateWith { key -> obj.optString(key, "") }
+    } catch (e: JSONException) {
+        emptyMap()
+    }
+
+    /** Extracts a real tool name + arguments from Groq's own "attempted to call tool '<name>'
+     *  which was not in request.tools" error text, for the specific malformed-call pattern where
+     *  the model glued the arguments JSON onto the end of the function name. Returns null (no
+     *  guessing) whenever the text doesn't actually match that shape. */
+    private fun recoverMalformedToolCall(bodyMessage: String): GroqToolCall? {
+        val match = MALFORMED_TOOL_CALL_REGEX.find(bodyMessage) ?: return null
+        val raw = match.groupValues[1]
+        val braceIndex = raw.indexOf('{')
+        if (braceIndex <= 0) return null
+        val toolName = raw.substring(0, braceIndex).trim().trimEnd('.', ' ')
+        if (toolName.isBlank()) return null
+        val jsonPart = raw.substring(braceIndex).trim()
+        val arguments = try {
+            JSONObject(jsonPart)
+        } catch (e: JSONException) {
+            return null
+        }
+        val argMap = arguments.keys().asSequence().associateWith { key -> arguments.optString(key, "") }
+        return GroqToolCall(id = "call_recovered_0", name = toolName, arguments = argMap)
     }
 
     private fun extractErrorMessage(body: String): String? = try {
@@ -339,5 +381,7 @@ class GroqClient(
     companion object {
         const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
         private const val RETRY_BACKOFF_MS = 400L
+        private val MALFORMED_TOOL_CALL_REGEX =
+            Regex("attempted to call tool '(.*)' which was not in request\\.tools", RegexOption.DOT_MATCHES_ALL)
     }
 }
