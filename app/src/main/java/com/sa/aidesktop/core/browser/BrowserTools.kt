@@ -38,11 +38,15 @@ private fun BrowserResult<BrowserPage>.toInspectAi(): AIResult<ToolResult> = whe
                 .append(" visible=").append(it.visible)
                 .append(" interactable=").append(it.interactable)
                 .append(" value=").append(if (it.inputType.lowercase() in setOf("password")) "[REDACTED]" else it.value?.take(180))
+                .append(if (it.href.isNotBlank()) " href=" + it.href.take(300) else "")
                 .append("\n")
         }
         if (p.links.isNotEmpty()) {
-            sb.append("LINKS\n")
-            p.links.forEach { sb.append("- ref=").append(it.ref).append(" ").append(it.text.take(180)).append(" label=").append(it.ariaLabel.take(100)).append("\n") }
+            // href is the real destination URL — this is what lets the model tell a normal video
+            // link (e.g. /watch?v=...) apart from a Shorts link (/shorts/...) or an ad/unrelated
+            // link with the same-looking title text, instead of guessing from text alone.
+            sb.append("LINKS (ref, visible text, aria-label, real destination href)\n")
+            p.links.forEach { sb.append("- ref=").append(it.ref).append(" ").append(it.text.take(180)).append(" label=").append(it.ariaLabel.take(100)).append(" href=").append(it.href.take(300)).append("\n") }
         }
         if (p.headings.isNotEmpty()) {
             sb.append("HEADINGS\n")
@@ -113,7 +117,7 @@ class BrowserNavigationTool(private val action: String, browser: AndroidBrowserS
 
 class BrowserInspectTool(browser: AndroidBrowserService, wm: WindowManager) : BrowserTool(browser, wm, ToolRisk.READ_ONLY) {
     override val id = "browser.inspect"
-    override val description = "Inspect the actual current webpage DOM/accessibility-relevant controls and visible text using the real WebView."
+    override val description = "Inspect the actual current webpage DOM/accessibility-relevant controls and visible text using the real WebView. Each link/element includes its real destination href — always read it before clicking a search result (e.g. to tell a normal video link apart from a Shorts link, an ad, or an unrelated link that happens to have similar visible text)."
     override val parameterHints = mapOf("window_id" to "Browser window id")
     override suspend fun execute(input: Map<String, String>) =
         (windowId(input)?.let { browser.inspect(it) }
@@ -145,7 +149,7 @@ class BrowserElementTool(
 ) : BrowserTool(browser, wm, riskForElementAction(action)) {
     override val id = "browser.$action"
     override val description = when(action) {
-        "click" -> "Click an actual inspected webpage element by its current reference."
+        "click" -> "Click an actual inspected webpage element by its current reference. Call browser.inspect first and pick the ref whose href actually matches what the user asked for (e.g. a real video/song page, not a Shorts link, ad, or unrelated result) — never click by guessing position or title text alone."
         "type" -> "Type into an actual inspected editable webpage control by reference."
         "clear" -> "Clear an actual inspected editable webpage control by reference."
         "select" -> "Select an actual option in an HTML select control by reference."

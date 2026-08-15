@@ -28,7 +28,11 @@ data class BrowserElement(
     val enabled: Boolean = true,
     val visible: Boolean = true,
     val interactable: Boolean = false,
-    val required: Boolean? = null
+    val required: Boolean? = null,
+    // Real resolved destination URL for <a> links (empty for non-link elements). Without this the
+    // model has no way to tell a normal video link from a Shorts link, a real download from a
+    // fake button, etc. — it was guessing from visible text/label alone.
+    val href: String = ""
 )
 
 data class BrowserPage(

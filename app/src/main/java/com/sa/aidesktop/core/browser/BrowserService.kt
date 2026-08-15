@@ -451,7 +451,7 @@ class AndroidBrowserService(
           function interactable(e){return ["A","BUTTON","INPUT","TEXTAREA","SELECT","SUMMARY"].includes(e.tagName)||e.isContentEditable||typeof e.onclick==="function"||!!e.getAttribute("role")}
           function role(e){return e.getAttribute("role")||({"A":"link","BUTTON":"button","INPUT":"input","TEXTAREA":"textarea","SELECT":"select","SUMMARY":"button","FORM":"form"}[e.tagName]||e.tagName.toLowerCase())}
           function add(e){if(!e.dataset.saRef)e.dataset.saRef="p2-"+(++counter);return e.dataset.saRef}
-          function item(e,i){return {ref:add(e),index:i,role:role(e),text:(e.innerText||e.value||"").trim().replace(/\s+/g," ").slice(0,300),ariaLabel:(e.getAttribute("aria-label")||e.getAttribute("title")||"").trim().slice(0,200),inputType:(e.type||"").toString(),value:(e.tagName==="INPUT" && (e.type||"").toLowerCase()==="password")?null:((e.tagName==="INPUT"||e.tagName==="TEXTAREA"||e.tagName==="SELECT")?String(e.value||"").slice(0,300):null),enabled:!e.disabled,visible:visible(e),interactable:interactable(e),required:e.required===true}
+          function item(e,i){return {ref:add(e),index:i,role:role(e),text:(e.innerText||e.value||"").trim().replace(/\s+/g," ").slice(0,300),ariaLabel:(e.getAttribute("aria-label")||e.getAttribute("title")||"").trim().slice(0,200),inputType:(e.type||"").toString(),value:(e.tagName==="INPUT" && (e.type||"").toLowerCase()==="password")?null:((e.tagName==="INPUT"||e.tagName==="TEXTAREA"||e.tagName==="SELECT")?String(e.value||"").slice(0,300):null),enabled:!e.disabled,visible:visible(e),interactable:interactable(e),required:e.required===true,href:(e.tagName==="A"?(e.href||""):"")}
           }
           const all=nodes.slice(0,max).map(item);
           const links=nodes.filter(e=>e.tagName==="A").slice(0,${limits.maxLinks}).map((e,i)=>item(e,i));
@@ -469,7 +469,7 @@ class AndroidBrowserService(
                 val a=o.optJSONArray(key)?:JSONArray()
                 return (0 until a.length()).map { i ->
                     val e=a.getJSONObject(i)
-                    BrowserElement(e.optString("ref"),e.optInt("index"),e.optString("role"),e.optString("text"),e.optString("ariaLabel"),e.optString("inputType"),if(e.isNull("value"))null else e.optString("value"),e.optBoolean("enabled"),e.optBoolean("visible"),e.optBoolean("interactable"),if(e.has("required"))e.optBoolean("required") else null)
+                    BrowserElement(e.optString("ref"),e.optInt("index"),e.optString("role"),e.optString("text"),e.optString("ariaLabel"),e.optString("inputType"),if(e.isNull("value"))null else e.optString("value"),e.optBoolean("enabled"),e.optBoolean("visible"),e.optBoolean("interactable"),if(e.has("required"))e.optBoolean("required") else null,e.optString("href"))
                 }
             }
             BrowserResult.Success(
