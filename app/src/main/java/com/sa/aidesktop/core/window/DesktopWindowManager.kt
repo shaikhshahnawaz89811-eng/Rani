@@ -60,7 +60,17 @@ class DesktopWindowManager : WindowManager {
         }
     }
 
-    override fun close(id: String) {
+    /** Minimum usable size per window type. AI/Terminal/Git windows carry a fixed header, a
+     *  quick-command bar and an input row that don't shrink below their own content, so letting
+     *  those windows resize down to the generic 260x180 minimum squeezed/overlapped that chrome
+     *  instead of shrinking it. Types without that extra chrome keep the original minimum. */
+    private fun minSizeFor(type: WindowType): Pair<Float, Float> = when (type) {
+        WindowType.AI -> 300f to 340f
+        WindowType.TERMINAL, WindowType.GIT -> 280f to 220f
+        else -> 260f to 180f
+    }
+
+
         if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         val remaining = _windows.value.filterNot { it.id == id }
         _windows.value = focusTop(remaining)
@@ -132,8 +142,7 @@ class DesktopWindowManager : WindowManager {
         if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         update(id) { w ->
             if (w.state != WindowState.NORMAL) return@update w
-            val minW = 260f
-            val minH = 180f
+            val (minW, minH) = minSizeFor(w.type)
             val leftEdge = edge == ResizeEdge.LEFT || edge == ResizeEdge.TOP_LEFT || edge == ResizeEdge.BOTTOM_LEFT
             val topEdge = edge == ResizeEdge.TOP || edge == ResizeEdge.TOP_LEFT || edge == ResizeEdge.TOP_RIGHT
             val rawW = if (leftEdge) w.width - dx else if (edge == ResizeEdge.RIGHT || edge == ResizeEdge.TOP_RIGHT || edge == ResizeEdge.BOTTOM_RIGHT) w.width + dx else w.width
@@ -162,8 +171,9 @@ class DesktopWindowManager : WindowManager {
             if (w.id != id || w.state != WindowState.NORMAL || w.protectedByTaskId != null) {
                 w
             } else {
-                val minW = 260f.coerceAtMost(maxWidth)
-                val minH = 180f.coerceAtMost(maxHeight)
+                val (baseMinW, baseMinH) = minSizeFor(w.type)
+                val minW = baseMinW.coerceAtMost(maxWidth)
+                val minH = baseMinH.coerceAtMost(maxHeight)
 
                 val leftEdge = edge == ResizeEdge.LEFT ||
                     edge == ResizeEdge.TOP_LEFT ||

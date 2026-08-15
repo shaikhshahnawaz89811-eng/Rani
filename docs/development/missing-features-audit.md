@@ -1,6 +1,21 @@
 # Missing / Deferred Capability Audit
 
 ## Fixed in this audit
+- `browser.open`/back/forward/reload/stop/scroll/focus no longer require manual approval —
+  they only view/navigate a page, so they run like any other read-only tool. `click`, `type`,
+  `select`, `check`, `upload`, and `download` still require approval since those can submit
+  forms, enter data, or move a real file.
+- AI/Terminal/Git windows can no longer be resized below the minimum height their own header +
+  toolbar + input row need, which previously made input fields/suggestions overlap when a
+  window was shrunk a lot.
+- Raw `AIError`/exception objects (e.g. `ModelUnavailable(message=...)`) are no longer shown
+  verbatim in AI chat; the real message text is preserved but the Kotlin wrapper is stripped.
+- One AI reply can now ask for more than one action needing approval (e.g. "message someone and
+  play a song" in one prompt). Previously the router surfaced only the first write-tool request
+  from a turn and silently dropped the rest; now every requested action is queued, shown one at
+  a time as "Approval required (1 of N)", and — once every step in that batch is approved and
+  actually executed — the model gets all the real results back together so it can finish the
+  reply. Cancelling, or a step failing, stops the rest of that batch instead of skipping ahead.
 - Window resizing now supports all four edges and all four corners.
 - Window geometry is clamped after portrait/landscape size changes.
 - Browser instances are independent desktop windows rather than tabs.

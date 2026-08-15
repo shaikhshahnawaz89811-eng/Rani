@@ -15,6 +15,16 @@ data class AIResponse(
     val toolTrace:List<String> = emptyList()
 )
 sealed interface AIError { data class InvalidRequest(val message:String):AIError; data class ModelUnavailable(val message:String):AIError; data class ToolDenied(val message:String):AIError; data class Execution(val message:String):AIError }
+
+/** Human-readable text for an [AIError]. The real message text is preserved verbatim — this only
+ *  strips the raw `ModelUnavailable(message=...)` Kotlin data-class wrapper so chat UI never shows
+ *  it to the user. No error detail is invented or hidden. */
+fun AIError.toDisplayMessage(): String = when (this) {
+    is AIError.InvalidRequest -> message
+    is AIError.ModelUnavailable -> message
+    is AIError.ToolDenied -> message
+    is AIError.Execution -> message
+}
 sealed interface AIResult<out T> { data class Success<T>(val value:T):AIResult<T>; data class Failure(val error:AIError):AIResult<Nothing> }
 interface LocalModelEngine { suspend fun generate(request:AIRequest):AIResult<AIResponse> }
 interface ModelAdapter { suspend fun generate(request:AIRequest):AIResult<AIResponse> }

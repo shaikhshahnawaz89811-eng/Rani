@@ -147,21 +147,22 @@ class ModelRouter(
                         }
                     }
 
-                    val writeRequest = knownRequests.firstOrNull { it.risk != ToolRisk.READ_ONLY }
-                    if (writeRequest != null) {
+                    val writeRequests = knownRequests.filter { it.risk != ToolRisk.READ_ONLY }
+                    if (writeRequests.isNotEmpty()) {
                         status = status.copy(
                             lastTier = RouterTier.ONLINE_GROQ,
                             lastError = null,
                             consecutiveOnlineFailures = 0
                         )
                         val text = response.text.ifBlank {
-                            "Approval required for ${writeRequest.toolId}."
+                            if (writeRequests.size == 1) "Approval required for ${writeRequests.first().toolId}."
+                            else "Approval required for ${writeRequests.size} actions."
                         }
-                        trace += "APPROVAL REQUIRED: ${writeRequest.toolId} (${writeRequest.risk})"
+                        writeRequests.forEach { trace += "APPROVAL REQUIRED: ${it.toolId} (${it.risk})" }
                         return AIResult.Success(
                             AIResponse(
                                 text = text,
-                                toolRequests = listOf(writeRequest),
+                                toolRequests = writeRequests,
                                 toolTrace = trace.toList()
                             )
                         )

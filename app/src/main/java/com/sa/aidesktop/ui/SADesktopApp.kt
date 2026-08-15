@@ -633,6 +633,8 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<ToolRequest?>(null) }
+    var pendingQueue by remember { mutableStateOf<List<ToolRequest>>(emptyList()) }
+    var appliedBatchResults by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingTaskId by remember { mutableStateOf<String?>(null) }
     var pendingChatPrompt by remember { mutableStateOf<String?>(null) }
     var tier by remember { mutableStateOf<RouterTier?>(null) }
@@ -690,6 +692,8 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         input = ""
         busy = true
         pending = null
+        pendingQueue = emptyList()
+        appliedBatchResults = emptyList()
         pendingTaskId = null
         pendingChatPrompt = null
         lastToolTrace = emptyList()
@@ -734,12 +738,15 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                             msgs.add(AIMessage(result.value.text, false, "Now"))
                         }
                         pending = result.value.toolRequests.firstOrNull { gate.requiresApproval(it.risk) }
+                        pendingQueue = result.value.toolRequests
+                            .filter { gate.requiresApproval(it.risk) }
+                            .drop(1)
                         pendingTaskId = null
                         pendingChatPrompt = if (pending != null) p else null
                     }
                     is AIResult.Failure -> {
                         lastToolTrace = emptyList()
-                        msgs.add(AIMessage("AI error: ${result.error}", false, "Now"))
+                        msgs.add(AIMessage("AI error: ${result.error.toDisplayMessage()}", false, "Now"))
                     }
                 }
             }
@@ -793,7 +800,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 border = BorderStroke(1.dp, Color(0xFF70458D))
             ) {
                 Column(Modifier.padding(10.dp)) {
-                    Text("Approval required", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE4C7FF))
+                    Text(
+                        if (pendingQueue.isEmpty()) "Approval required"
+                        else "Approval required (1 of ${pendingQueue.size + 1})",
+                        fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE4C7FF)
+                    )
                     Text(
                         "Tool: ${request.toolId} • Risk: ${request.risk}",
                         fontSize = 9.sp,
@@ -809,7 +820,12 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(
                             onClick = {
+                                // Cancelling stops the whole queued batch, not just this one step —
+                                // a partial batch silently continuing without the user's say would
+                                // be more confusing than starting over.
                                 pending = null
+                                pendingQueue = emptyList()
+                                appliedBatchResults = emptyList()
                                 pendingTaskId = null
                                 pendingChatPrompt = null
                             }
@@ -820,7 +836,9 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                                 val requestToApply = request
                                 val taskId = pendingTaskId
                                 val originalChatPrompt = pendingChatPrompt
+                                val queueSnapshot = pendingQueue
                                 pending = null
+                                pendingQueue = emptyList()
                                 busy = true
                                 scope.launch {
                                     when (
@@ -855,62 +873,79 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                                                 pendingTaskId = continued.pendingTool?.let { continued.record.taskId }
                                                 pendingChatPrompt = null
                                             } else if (originalChatPrompt != null) {
-                                                // Normal chat approval needs to return to the model
-                                                // with the real tool result. Previously the UI stopped
-                                                // at "Applied", leaving the conversation half-wired.
-                                                when (
-                                                    val followUp = service.chat(
-                                                        AIRequest(
-                                                            prompt = originalChatPrompt,
-                                                            context = ProjectContext(projectStructure = "MyProject workspace"),
-                                                            history = msgs.takeLast(8).map {
-                                                                AIConversationMessage(
-                                                                    if (it.fromUser) "user" else "assistant",
-                                                                    it.text
-                                                                )
-                                                            } + listOf(
-                                                                AIConversationMessage(
-                                                                    "tool",
-                                                                    "${requestToApply.toolId} REAL RESULT:\n${applied.value.output.take(12000)}"
+                                                val batchResults = appliedBatchResults +
+                                                    "${requestToApply.toolId} REAL RESULT:\n${applied.value.output.take(12000)}"
+                                                if (queueSnapshot.isNotEmpty()) {
+                                                    // More approvals from the same AI turn are still
+                                                    // queued — hold off asking the model to continue
+                                                    // until every step in this batch has actually run,
+                                                    // so it sees every real result together instead of
+                                                    // reacting to one at a time.
+                                                    appliedBatchResults = batchResults
+                                                    pending = queueSnapshot.first()
+                                                    pendingQueue = queueSnapshot.drop(1)
+                                                    pendingChatPrompt = originalChatPrompt
+                                                } else {
+                                                    appliedBatchResults = emptyList()
+                                                    // Normal chat approval needs to return to the model
+                                                    // with the real tool result(s). Previously the UI stopped
+                                                    // at "Applied", leaving the conversation half-wired.
+                                                    when (
+                                                        val followUp = service.chat(
+                                                            AIRequest(
+                                                                prompt = originalChatPrompt,
+                                                                context = ProjectContext(projectStructure = "MyProject workspace"),
+                                                                history = msgs.takeLast(8).map {
+                                                                    AIConversationMessage(
+                                                                        if (it.fromUser) "user" else "assistant",
+                                                                        it.text
+                                                                    )
+                                                                } + listOf(
+                                                                    AIConversationMessage(
+                                                                        "tool",
+                                                                        batchResults.joinToString("\n\n")
+                                                                    )
                                                                 )
                                                             )
                                                         )
-                                                    )
-                                                ) {
-                                                    is AIResult.Success -> {
-                                                        lastToolTrace = followUp.value.toolTrace
-                                                        if (followUp.value.toolTrace.isNotEmpty()) {
+                                                    ) {
+                                                        is AIResult.Success -> {
+                                                            lastToolTrace = followUp.value.toolTrace
+                                                            if (followUp.value.toolTrace.isNotEmpty()) {
+                                                                msgs.add(
+                                                                    AIMessage(
+                                                                        followUp.value.toolTrace.joinToString("\n"),
+                                                                        false,
+                                                                        "Now"
+                                                                    )
+                                                                )
+                                                            }
+                                                            if (followUp.value.text.isNotBlank()) {
+                                                                msgs.add(
+                                                                    AIMessage(
+                                                                        followUp.value.text,
+                                                                        false,
+                                                                        "Now"
+                                                                    )
+                                                                )
+                                                            }
+                                                            val nextWrites = followUp.value.toolRequests.filter {
+                                                                gate.requiresApproval(it.risk)
+                                                            }
+                                                            pending = nextWrites.firstOrNull()
+                                                            pendingQueue = nextWrites.drop(1)
+                                                            pendingChatPrompt = if (pending != null) originalChatPrompt else null
+                                                            pendingTaskId = null
+                                                        }
+                                                        is AIResult.Failure -> {
                                                             msgs.add(
                                                                 AIMessage(
-                                                                    followUp.value.toolTrace.joinToString("\n"),
+                                                                    "AI follow-up error: ${followUp.error.toDisplayMessage()}",
                                                                     false,
                                                                     "Now"
                                                                 )
                                                             )
                                                         }
-                                                        if (followUp.value.text.isNotBlank()) {
-                                                            msgs.add(
-                                                                AIMessage(
-                                                                    followUp.value.text,
-                                                                    false,
-                                                                    "Now"
-                                                                )
-                                                            )
-                                                        }
-                                                        pending = followUp.value.toolRequests.firstOrNull {
-                                                            gate.requiresApproval(it.risk)
-                                                        }
-                                                        pendingChatPrompt = if (pending != null) originalChatPrompt else null
-                                                        pendingTaskId = null
-                                                    }
-                                                    is AIResult.Failure -> {
-                                                        msgs.add(
-                                                            AIMessage(
-                                                                "AI follow-up error: ${followUp.error}",
-                                                                false,
-                                                                "Now"
-                                                            )
-                                                        )
                                                     }
                                                 }
                                             }
@@ -919,11 +954,15 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                                         is AIResult.Failure -> {
                                             msgs.add(
                                                 AIMessage(
-                                                    "Action failed: ${applied.error}",
+                                                    "Action failed: ${applied.error.toDisplayMessage()}",
                                                     false,
                                                     "Now"
                                                 )
                                             )
+                                            // A failure stops the rest of the queued batch rather than
+                                            // silently skipping ahead to the next queued action.
+                                            pendingQueue = emptyList()
+                                            appliedBatchResults = emptyList()
                                             if (taskId != null) {
                                                 pending = null
                                                 pendingTaskId = null

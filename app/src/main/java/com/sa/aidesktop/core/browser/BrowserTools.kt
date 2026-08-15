@@ -81,7 +81,7 @@ abstract class BrowserTool(
     }
 }
 
-class BrowserOpenTool(browser: AndroidBrowserService, wm: WindowManager) : BrowserTool(browser, wm, ToolRisk.WRITE) {
+class BrowserOpenTool(browser: AndroidBrowserService, wm: WindowManager) : BrowserTool(browser, wm, ToolRisk.READ_ONLY) {
     override val id = "browser.open"
     override val description = "Open a real HTTP(S) URL or web search in a real SA Desktop WebView browser window."
     override val parameterHints = mapOf("url" to "URL or search text", "window_id" to "Optional browser window id")
@@ -94,7 +94,7 @@ class BrowserOpenTool(browser: AndroidBrowserService, wm: WindowManager) : Brows
     }
 }
 
-class BrowserNavigationTool(private val action: String, browser: AndroidBrowserService, wm: WindowManager) : BrowserTool(browser, wm, ToolRisk.WRITE) {
+class BrowserNavigationTool(private val action: String, browser: AndroidBrowserService, wm: WindowManager) : BrowserTool(browser, wm, ToolRisk.READ_ONLY) {
     override val id = "browser.$action"
     override val description = "Perform the real WebView $action operation."
     override val parameterHints = mapOf("window_id" to "Browser window id")
@@ -129,11 +129,20 @@ class BrowserSearchTool(browser: AndroidBrowserService, wm: WindowManager) : Bro
             ?: BrowserResult.Failure("No browser window is open.")).toAi("browser.search")
 }
 
+private fun riskForElementAction(action: String): ToolRisk = when (action) {
+    // Pure viewing/navigation on the already-loaded page — no data entered, nothing submitted,
+    // no file moved. Safe to run without an approval prompt, same reasoning as browser.open.
+    "scroll", "focus" -> ToolRisk.READ_ONLY
+    // click/type/select/check can submit forms, enter data, or trigger purchases/side effects;
+    // upload/download move real files. These keep requiring explicit approval.
+    else -> ToolRisk.WRITE
+}
+
 class BrowserElementTool(
     private val action: String,
     browser: AndroidBrowserService,
     wm: WindowManager
-) : BrowserTool(browser, wm, ToolRisk.WRITE) {
+) : BrowserTool(browser, wm, riskForElementAction(action)) {
     override val id = "browser.$action"
     override val description = when(action) {
         "click" -> "Click an actual inspected webpage element by its current reference."
