@@ -70,7 +70,7 @@ class DesktopWindowManager : WindowManager {
         else -> 260f to 180f
     }
 
-
+    override fun close(id: String) {
         if (_windows.value.firstOrNull { it.id == id }?.protectedByTaskId != null) return
         val remaining = _windows.value.filterNot { it.id == id }
         _windows.value = focusTop(remaining)
