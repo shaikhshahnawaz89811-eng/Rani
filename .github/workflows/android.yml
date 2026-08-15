@@ -73,4 +73,4 @@ jobs:
           api-level: 34
           arch: x86_64
           target: google_apis
-          script: ./gradlew connectedDebugAndroidTest --stacktrace -Pandroid.testInstrumentationRunnerArguments.class=com.sa.aidesktop.core.python.EmbeddedPythonEngineInstrumentedTest
+          script: ./gradlew connectedDebugAndroidTest --stacktrace
