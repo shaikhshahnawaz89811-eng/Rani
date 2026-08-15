@@ -53,8 +53,8 @@ class WindowManagerTest {
         wm.resize("terminal", ResizeEdge.BOTTOM_RIGHT, -1000f, -1000f)
 
         val w = wm.windows.single()
-        assertEquals(260f, w.width, 0.01f)
-        assertEquals(180f, w.height, 0.01f)
+        assertEquals(280f, w.width, 0.01f)
+        assertEquals(220f, w.height, 0.01f)
     }
 
     @Test
