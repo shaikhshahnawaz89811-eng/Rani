@@ -43,11 +43,12 @@ class GroqClientTest {
             }
             val output = socket.getOutputStream()
             output.write(
-                "HTTP/1.1 $code $reason\r\n" +
-                    "Content-Type: application/json\r\n" +
-                    "Content-Length: $length\r\n" +
-                    "Connection: close\r\n\r\n"
-                    .toByteArray(Charsets.UTF_8)
+                (
+                    "HTTP/1.1 $code $reason\r\n" +
+                        "Content-Type: application/json\r\n" +
+                        "Content-Length: $length\r\n" +
+                        "Connection: close\r\n\r\n"
+                    ).toByteArray(Charsets.UTF_8)
             )
         }
 
