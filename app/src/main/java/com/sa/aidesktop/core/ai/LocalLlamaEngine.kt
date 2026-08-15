@@ -1,15 +1,24 @@
 package com.sa.aidesktop.core.ai
 
-import dev.ffmpegkit.llama.Llama
-import dev.ffmpegkit.llama.LlamaConfig
-import dev.ffmpegkit.llama.LlamaModel
 import java.io.File
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Real on-device GGUF inference adapter.
+ * On-device GGUF model adapter.
+ *
+ * NOTE: `dev.ffmpegkit-maintained:llama-android:0.1.1` (previously imported here as
+ * `dev.ffmpegkit.llama.*`) is not a published artifact - it does not exist on Maven Central or
+ * any other repository, so Gradle could never resolve it and the module could never compile.
+ * That dependency has been removed from app/build.gradle.kts.
+ *
+ * Until a real, verified on-device llama.cpp/GGUF runtime is wired in, this class keeps doing
+ * its genuine, non-fabricated work - validating the configured model path/file/GGUF header - and
+ * is honest that no inference runtime is bundled, the same "no fake/rule-based fallback, explicit
+ * ModelUnavailable" contract already used by [UnavailableOfflineAI]. The public API (class name,
+ * constructor, status()/load()/unload()/generate(), LocalModelState, LocalModelStatus,
+ * LocalModelConfig) is unchanged so ModelRouter, the Settings/AI windows, and the existing tests
+ * keep working exactly as before.
  *
  * The model is intentionally NOT bundled and is never downloaded by this class. The caller
  * supplies a local model path (normally copied into app-private storage from a user-selected
@@ -21,7 +30,6 @@ class LocalLlamaEngine(
 ) : AIService, LocalModelEngine {
 
     private val mutex = Mutex()
-    private var model: LlamaModel? = null
     private var loadedPath: String? = null
     @Volatile private var state: LocalModelState = LocalModelState.NOT_CONFIGURED
     @Volatile private var lastError: String? = null
@@ -40,24 +48,16 @@ class LocalLlamaEngine(
         if (!looksLikeGguf(file)) {
             return setStatus(LocalModelState.FAILED, "Configured local model is not a valid GGUF file.")
         }
-        if (model != null && loadedPath == file.canonicalPath) return setStatus(LocalModelState.READY, null)
-        if (model != null && loadedPath != file.canonicalPath) {
-            releaseLocked()
-        }
-
-        setStatus(LocalModelState.LOADING, null)
-        return try {
-            model = Llama.loadModel(modelPath = file.canonicalPath, config = configProvider().toLlamaConfig())
-            loadedPath = file.canonicalPath
-            setStatus(LocalModelState.READY, null)
-        } catch (e: CancellationException) {
-            setStatus(LocalModelState.UNAVAILABLE, "Local model loading was cancelled.")
-            throw e
-        } catch (t: Throwable) {
-            model = null
-            loadedPath = null
-            setStatus(LocalModelState.FAILED, t.message ?: t.javaClass.simpleName)
-        }
+        loadedPath = file.canonicalPath
+        // A real GGUF file is configured and readable, but no on-device inference runtime is
+        // bundled in this build (see the class doc above) - report that honestly instead of
+        // fabricating a successful model load.
+        return setStatus(
+            LocalModelState.UNAVAILABLE,
+            "A valid GGUF model is configured at $path, but this build does not bundle a local " +
+                "inference runtime yet. Only Groq (cloud) is available until a real on-device " +
+                "llama.cpp/GGUF dependency is added."
+        )
     }
 
     suspend fun unload() = mutex.withLock {
@@ -69,34 +69,12 @@ class LocalLlamaEngine(
     }
 
     private fun releaseLocked() {
-        model?.let { runCatching { Llama.releaseModel(it) } }
-        model = null
         loadedPath = null
     }
 
     override suspend fun generate(request: AIRequest): AIResult<AIResponse> = mutex.withLock {
         val loaded = loadLocked()
-        if (loaded.state != LocalModelState.READY) {
-            return@withLock AIResult.Failure(AIError.ModelUnavailable(loaded.error ?: "Local model is unavailable."))
-        }
-        val active = model ?: return@withLock AIResult.Failure(AIError.ModelUnavailable("Local model is not loaded."))
-        try {
-            val config = configProvider()
-            val result = Llama.complete(
-                model = active,
-                prompt = buildPrompt(request),
-                systemPrompt = LOCAL_SYSTEM_PROMPT,
-                maxTokens = config.maxOutputTokens
-            )
-            val text = result.text.trim()
-            if (text.isBlank()) AIResult.Failure(AIError.Execution("Local model returned an empty response."))
-            else AIResult.Success(AIResponse(text))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            setStatus(LocalModelState.FAILED, t.message ?: t.javaClass.simpleName)
-            AIResult.Failure(AIError.Execution("Local inference failed: ${t.message ?: t.javaClass.simpleName}"))
-        }
+        AIResult.Failure(AIError.ModelUnavailable(loaded.error ?: "Local model is unavailable."))
     }
 
     override suspend fun chat(request: AIRequest) = generate(request)
@@ -169,3 +147,20 @@ data class LocalModelConfig(
         seed = -1,
     )
 }
+
+/**
+ * Bounded, mobile-safe inference parameters for a local GGUF model. Previously this mapped
+ * directly onto `dev.ffmpegkit.llama.LlamaConfig` from the unpublished, non-existent
+ * `dev.ffmpegkit-maintained:llama-android` artifact; it is now a plain local data class so
+ * [LocalModelConfig.toLlamaConfig] (and the existing test that asserts its clamped values)
+ * keeps compiling without depending on that missing dependency.
+ */
+data class LlamaConfig(
+    val contextSize: Int,
+    val threads: Int,
+    val gpuLayers: Int,
+    val temperature: Float,
+    val topP: Float,
+    val topK: Int,
+    val seed: Int,
+)

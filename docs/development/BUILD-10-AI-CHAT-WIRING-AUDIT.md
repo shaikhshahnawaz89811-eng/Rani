@@ -23,13 +23,14 @@ of maintaining a stale hard-coded subset.
 
 ## Local GGUF
 
-- The existing real llama.cpp/Android GGUF engine remains unchanged as the inference runtime.
-- Conversation history is supplied to the local model.
-- The compact local model is not treated as a reliable function-calling model.
+- No on-device inference runtime is bundled in this build (see LocalLlamaEngine's class doc):
+  the previous `dev.ffmpegkit-maintained:llama-android` dependency never resolved, so the local
+  path now honestly reports `ModelUnavailable` instead of claiming inference it cannot perform.
 - Explicit, unambiguous commands such as arithmetic, time, date, battery, file listing/reading/search,
   project inspection and read-only Git status/diff/log/remote use the same real ToolRegistry through
-  `LocalIntentRouter`.
-- Ambiguous requests still go to the real local model instead of being guessed into a tool call.
+  `LocalIntentRouter` regardless of local-model availability, and are unaffected by this.
+- Ambiguous requests fall through to Groq (cloud); with no API key and no local runtime, they
+  correctly report unavailable rather than fabricating a response.
 
 ## User-visible state
 

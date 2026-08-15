@@ -1241,11 +1241,11 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         Divider(Modifier.padding(top=14.dp))
 
         Text("AI Provider — Offline Local LLM",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text("Real GGUF inference runs on-device through llama.cpp. No Groq, web API, or runtime downloader is used.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
+        Text("This build does not bundle an on-device inference runtime yet, so a configured GGUF model is validated but cannot run locally — Groq (cloud) is used instead until a real runtime is added.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
         Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFFFC36B) else Color(0xFF79DFA0),modifier=Modifier.padding(top=6.dp))
         Row(Modifier.padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
             TextButton(onClick={ if(!localBusy) modelPicker.launch(arrayOf("application/octet-stream","application/*","*/*")) },enabled=!localBusy){Text(if(localBusy) "Importing…" else "Select GGUF model",fontSize=10.sp)}
-            TextButton(onClick={ localScope.launch { offlineAi.unload(); localStatus="Offline model unloaded from native memory." } }){Text("Unload",fontSize=10.sp)}
+            TextButton(onClick={ localScope.launch { offlineAi.unload(); localStatus="Offline model state reset." } }){Text("Unload",fontSize=10.sp)}
             TextButton(onClick={
                 if (!localBusy) localScope.launch {
                     offlineAi.unload()
@@ -1266,7 +1266,7 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         }
         TextButton(onClick={ store.setLocalContextSize(localContext.toIntOrNull() ?: 2048); store.setLocalThreads(localThreads.toIntOrNull() ?: 4); store.setLocalMaxOutputTokens(localMaxTokens.toIntOrNull() ?: 256); localContext=store.getLocalContextSize().toString(); localThreads=store.getLocalThreads().toString(); localMaxTokens=store.getLocalMaxOutputTokens().toString(); localStatus="Offline model settings saved." },modifier=Modifier.padding(top=4.dp)){Text("Save offline settings",fontSize=10.sp)}
         localStatus?.let { Text(it,fontSize=9.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=4.dp)) }
-        Text("Recommended starting point: a small Q4 GGUF model such as Qwen2.5 0.5B (~400 MiB). The model is not bundled or downloaded by Sara; import the GGUF yourself. CPU/NEON inference is used by the bundled runtime.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text("Recommended starting point: a small Q4 GGUF model such as Qwen2.5 0.5B (~400 MiB). The model is not bundled or downloaded by Sara; import the GGUF yourself. On-device inference is not wired in yet in this build, so imported models are stored and validated but Groq handles actual requests for now.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
 
         Text("Security",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Sensitive actions require confirmation. Secrets are not stored in source code, logs, or plaintext preferences — the Groq key lives only in the Android-Keystore-backed secure store.",fontSize=11.sp,color=Color(0xFF9AA7C8))
     }
