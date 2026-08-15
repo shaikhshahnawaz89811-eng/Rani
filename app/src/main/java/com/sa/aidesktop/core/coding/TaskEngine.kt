@@ -144,24 +144,60 @@ class TaskEngine(
                         delay(300L * (1L shl min(record.retryCount, 3)))
                     }
                     is AIResult.Success -> {
-                        val pending = response.value.toolRequests.firstOrNull { it.risk != ToolRisk.READ_ONLY }
                         val text = bounded(response.value.text, 10_000)
                         if (record.state == AgentTaskState.PLANNING && record.plan.isEmpty()) {
                             val parsed = parsePlan(text)
                             if (parsed.isNotEmpty()) record = save(record.copy(plan = parsed, state = AgentTaskState.INSPECTING, lastToolResult = text))
                         }
-                        if (pending != null) {
-                            val waitingState = classifyWaiting()
+
+                        // git.push (and anything else ever marked GIT_SENSITIVE) always stops for
+                        // the human's explicit go-ahead, even mid-task — pushing is externally
+                        // visible and hard to undo, and the user only wants it to happen when they
+                        // themselves ask for it.
+                        val gitSensitive = response.value.toolRequests.firstOrNull { it.risk == ToolRisk.GIT_SENSITIVE }
+                        if (gitSensitive != null) {
                             record = save(record.copy(
-                                state = waitingState,
-                                currentOperation = pending.toolId,
-                                pendingOperation = pending.toolId,
+                                state = AgentTaskState.WAITING_FOR_APPROVAL,
+                                currentOperation = gitSensitive.toolId,
+                                pendingOperation = gitSensitive.toolId,
                                 lastToolResult = text,
                                 iteration = record.iteration + 1,
-                                waitingReason = "Approval required for ${pending.toolId}",
+                                waitingReason = "Approval required for ${gitSensitive.toolId}",
                                 requiresProtectedInteraction = true
                             ))
-                            return TaskRunResult(record, pending)
+                            return TaskRunResult(record, gitSensitive)
+                        }
+
+                        // Every other non-read-only step the model proposes while running a task
+                        // the user already explicitly asked to run (build/fix/extract/create an
+                        // app, etc.) executes immediately through the same real gateway instead of
+                        // stopping to ask for a tap on every single build step — the user already
+                        // authorized this task by starting it. Nothing here is simulated: each
+                        // result below is the tool's actual real output.
+                        val autoApprove = response.value.toolRequests.filter { it.risk == ToolRisk.WRITE || it.risk == ToolRisk.EXECUTION }
+                        if (autoApprove.isNotEmpty()) {
+                            val results = mutableListOf<String>()
+                            val changedNow = mutableListOf<String>()
+                            for (toolRequest in autoApprove) {
+                                when (val executed = gateway.execute(toolRequest, approved = true)) {
+                                    is AIResult.Success -> {
+                                        results += "${toolRequest.toolId}: ${bounded(executed.value.output, 8000)}"
+                                        if (executed.value.changed) changedNow += toolRequest.toolId
+                                    }
+                                    is AIResult.Failure -> results += "${toolRequest.toolId} FAILED: ${bounded(describe(executed.error), 8000)}"
+                                }
+                            }
+                            val combined = (text + "\n" + results.joinToString("\n")).take(10_000)
+                            record = save(record.copy(
+                                state = AgentTaskState.EXECUTING,
+                                currentOperation = "Auto-approved: ${autoApprove.joinToString { it.toolId }}",
+                                completedOperations = (record.completedOperations + autoApprove.map { it.toolId }).takeLast(100),
+                                changedFiles = (record.changedFiles + changedNow).takeLast(100),
+                                lastToolResult = combined,
+                                relevantContext = bounded((record.relevantContext + "\n" + results.joinToString("\n")).takeLast(14_000), 14_000),
+                                iteration = record.iteration + 1
+                            ))
+                            continue
                         }
 
                         if (isComplete(text)) {
@@ -196,6 +232,7 @@ class TaskEngine(
         appendLine("You are the Phase-6 task coordinator for Sara.")
         appendLine("Never claim a side effect succeeded unless a real tool result proves it.")
         appendLine("Use the existing tools only. Inspect live state before retrying an operation.")
+        appendLine("When creating or changing code, run the project's real build/test command (project.build / run_terminal) yourself and read the real output before declaring the work done — never say something works without having actually run it.")
         appendLine("Original request: ${record.request}")
         appendLine("Task ID: ${record.taskId}")
         appendLine("Current state: ${record.state}")
@@ -205,6 +242,7 @@ class TaskEngine(
         appendLine("Completed operations: ${record.completedOperations.takeLast(40).joinToString()}")
         appendLine("Reconciliation required: $reconciliation")
         appendLine("If user input/auth/approval is required, stop and state exactly what is needed.")
+        appendLine("Only call git.push if the user's original request above literally asked to push (e.g. said 'push' or 'git push'). If the request was only to build/create/fix something, stop after a local commit (if any) and say it is ready to push, but do not push yourself.")
         appendLine("For completion, end your response with [TASK_COMPLETE] only after real verification.")
         appendLine("For a user question, end with [WAITING_FOR_USER].")
         appendLine("Project context: ${bounded(context.projectStructure, 6000)}")

@@ -666,8 +666,8 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         }.filter { it.text.isNotBlank() } + AIConversationMessage("user", current)
     }
 
-    fun isAgentTaskRequest(prompt: String): Boolean =
-        Regex(
+    fun isAgentTaskRequest(prompt: String): Boolean {
+        val explicit = Regex(
             "(?i)\\b(" +
                 "fix\\s+(this|the)?\\s*(project|bug|error)|" +
                 "build\\s+(this|the)?\\s*(project|app)|" +
@@ -682,6 +682,16 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 "autonomous\\s+task|agent\\s+task" +
             ")\\b"
         ).containsMatchIn(prompt)
+        if (explicit) return true
+
+        // A request naming something to build (an app/tool/project/game/website/calculator/etc.)
+        // together with a build verb — Hindi ("banao"/"bana do") or English ("make"/"create"/
+        // "build"/"generate"/"develop") — is real coding work and belongs in the real
+        // terminal-backed task engine, not a single ambiguous tool guess in plain chat.
+        val buildVerb = Regex("(?i)\\b(banao|bana\\s*do|bnao|bnado|bna\\s*do|make|create|build|generate|develop)\\b")
+        val buildNoun = Regex("(?i)\\b(app|application|project|website|web\\s*site|tool|program|game|script|calculator|website)\\b")
+        return buildVerb.containsMatchIn(prompt) && buildNoun.containsMatchIn(prompt)
+    }
 
     fun send() {
         val p = input.trim()

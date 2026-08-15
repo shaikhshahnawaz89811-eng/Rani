@@ -91,8 +91,12 @@ class GitFetchTool(private val git: com.sa.aidesktop.core.git.GitService): AIToo
 
 class GitPushTool(private val git: com.sa.aidesktop.core.git.GitService): AITool {
     override val id = "git.push"
-    override val description = "Push real commits to an explicitly selected remote/branch after confirmation."
-    override val risk = ToolRisk.WRITE
+    override val description = "Push real commits to an explicitly selected remote/branch after confirmation. Only call this when the user's own words explicitly asked to push (e.g. 'git push', 'push karo') — never as part of finishing an unrelated build/coding task on your own initiative."
+    // Deliberately its own risk tier, separate from ordinary WRITE actions (file writes, local
+    // commits, terminal build commands): pushing is externally visible and hard to undo, so it
+    // must always stop for the human's explicit go-ahead — including when running inside an
+    // autonomous coding task where other WRITE/EXECUTION steps are auto-approved.
+    override val risk = ToolRisk.GIT_SENSITIVE
     override val parameterHints = mapOf(
         "remote" to "Explicit remote name, usually origin",
         "branch" to "Explicit branch name",
