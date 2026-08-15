@@ -95,6 +95,11 @@ class GroqClient(
                             return@withContext outcome
                         }
                         workingMessages = trimmed
+                    } else if (outcome.error is GroqError.RateLimited && outcome.error.retryAfterSeconds != null) {
+                        // Groq told us the exact real wait — honor that instead of the generic
+                        // fixed backoff, capped so one 429 can't stall the UI indefinitely.
+                        val waitMs = (outcome.error.retryAfterSeconds * 1000L).coerceAtMost(MAX_RATE_LIMIT_WAIT_MS)
+                        delay(waitMs)
                     } else {
                         delay(RETRY_BACKOFF_MS * (attempt + 1))
                     }
@@ -227,13 +232,13 @@ class GroqClient(
                         ?: "Groq rejected the API key (HTTP ${response.statusCode})."
                 )
             )
-            429 -> return GroqResult.Failure(
-                GroqError.RateLimited(
-                    extractErrorMessage(response.body)
-                        ?: "Groq rate limit reached (HTTP 429).",
-                    null
+            429 -> {
+                val message = extractErrorMessage(response.body)
+                    ?: "Groq rate limit reached (HTTP 429)."
+                return GroqResult.Failure(
+                    GroqError.RateLimited(message, extractRetryAfterSeconds(message))
                 )
-            )
+            }
             413 -> return GroqResult.Failure(
                 GroqError.PayloadTooLarge(
                     extractErrorMessage(response.body)
@@ -375,13 +380,23 @@ class GroqClient(
         null
     }
 
+    /** Groq's real 429 body says things like "Please try again in 14.17s" — read the actual
+     *  number it gave us instead of guessing a fixed backoff. Rounded up (never down) so we never
+     *  retry before Groq's own window has actually elapsed; null when the message doesn't contain
+     *  this exact wording. */
+    private fun extractRetryAfterSeconds(message: String): Int? =
+        RETRY_AFTER_REGEX.find(message)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+            ?.let { kotlin.math.ceil(it).toInt() }
+
     private fun JSONObject.optIntOrNull(key: String): Int? =
         if (has(key) && !isNull(key)) optInt(key) else null
 
     companion object {
         const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
         private const val RETRY_BACKOFF_MS = 400L
+        private const val MAX_RATE_LIMIT_WAIT_MS = 20_000L
         private val MALFORMED_TOOL_CALL_REGEX =
             Regex("attempted to call tool '(.*)' which was not in request\\.tools", RegexOption.DOT_MATCHES_ALL)
+        private val RETRY_AFTER_REGEX = Regex("try again in (\\d+(?:\\.\\d+)?)s", RegexOption.IGNORE_CASE)
     }
 }

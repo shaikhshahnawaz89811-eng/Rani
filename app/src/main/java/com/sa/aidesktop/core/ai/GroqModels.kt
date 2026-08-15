@@ -30,7 +30,7 @@ data class GroqSettings(
     companion object {
         const val DEFAULT_MODEL = "llama-3.3-70b-versatile"
         const val DEFAULT_TIMEOUT_MS = 30_000
-        const val DEFAULT_RETRY_LIMIT = 1
+        const val DEFAULT_RETRY_LIMIT = 2
         const val MIN_TIMEOUT_MS = 1_000
         const val MAX_TIMEOUT_MS = 120_000
         const val MAX_RETRY_LIMIT = 5

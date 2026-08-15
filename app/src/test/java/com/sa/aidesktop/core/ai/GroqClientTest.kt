@@ -145,6 +145,28 @@ class GroqClientTest {
         assertTrue((result as GroqResult.Failure).error is GroqError.RateLimited)
     }
 
+    @Test fun rateLimitParsesGroqsRealRetryAfterSeconds() = runBlocking {
+        val url = startServer { request ->
+            respond(
+                request, 429,
+                """{"error":{"message":"Rate limit reached for model `llama-3.3-70b-versatile`. Please try again in 14.17s."}}"""
+            )
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
+        val error = (result as GroqResult.Failure).error as GroqError.RateLimited
+        // Rounded up, never down, so we never retry before Groq's own window has elapsed.
+        assertEquals(15, error.retryAfterSeconds)
+    }
+
+    @Test fun rateLimitWithoutRetryAfterWordingLeavesItNull() = runBlocking {
+        val url = startServer { request -> respond(request, 429, """{"error":{"message":"rate limited"}}""") }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
+        val error = (result as GroqResult.Failure).error as GroqError.RateLimited
+        assertNull(error.retryAfterSeconds)
+    }
+
     @Test fun malformedJsonIsReportedNotCrashed() = runBlocking {
         val url = startServer { request -> respond(request, 200, "not json at all {{{") }
         val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
