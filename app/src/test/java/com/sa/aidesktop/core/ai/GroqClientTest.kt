@@ -1,34 +1,120 @@
 package com.sa.aidesktop.core.ai
 
-import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
-import java.net.InetSocketAddress
+import java.io.BufferedReader
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * These tests exercise GroqClient against a real HTTP server on loopback (JDK's built-in
- * com.sun.net.httpserver, not a mock/fake) so the request/response handling — headers, status
- * codes, JSON parsing, retries, and real socket timeouts — is genuinely tested, not simulated.
- * No call ever leaves localhost.
+ * These tests exercise GroqClient against a real HTTP server on loopback using only
+ * standard Java networking APIs. No Android API, mock server library, or external
+ * network is used. The server is bound to 127.0.0.1 only.
  */
 class GroqClientTest {
-    private var server: HttpServer? = null
+    private var server: ServerSocket? = null
+    private var serverThread: Thread? = null
 
-    @After fun tearDown() { server?.stop(0) }
-
-    private fun startServer(handler: (com.sun.net.httpserver.HttpExchange) -> Unit): String {
-        val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        s.createContext("/chat") { exchange -> handler(exchange) }
-        s.start()
-        server = s
-        return "http://127.0.0.1:${s.address.port}/chat"
+    @After
+    fun tearDown() {
+        server?.close()
+        serverThread?.join(1000)
+        server = null
+        serverThread = null
     }
 
-    private fun respond(exchange: com.sun.net.httpserver.HttpExchange, code: Int, body: String) {
-        val bytes = body.toByteArray()
+    private class TestExchange(
+        val requestHeaders: Map<String, String>,
+        val requestBody: InputStream,
+        private val socket: Socket
+    ) {
+        fun sendResponseHeaders(code: Int, length: Long) {
+            val reason = when (code) {
+                200 -> "OK"
+                401 -> "Unauthorized"
+                429 -> "Too Many Requests"
+                503 -> "Service Unavailable"
+                else -> "Response"
+            }
+            val output = socket.getOutputStream()
+            output.write(
+                "HTTP/1.1 $code $reason\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: $length\r\n" +
+                    "Connection: close\r\n\r\n"
+                    .toByteArray(Charsets.UTF_8)
+            )
+        }
+
+        val responseBody: java.io.OutputStream
+            get() = socket.getOutputStream()
+    }
+
+    private fun startServer(handler: (TestExchange) -> Unit): String {
+        val s = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        server = s
+
+        serverThread = Thread {
+            while (!s.isClosed) {
+                try {
+                    val socket = s.accept()
+                    Thread {
+                        socket.use { handleConnection(it, handler) }
+                    }.start()
+                } catch (_: java.net.SocketException) {
+                    if (!s.isClosed) break
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+
+        return "http://127.0.0.1:${s.localPort}/chat"
+    }
+
+    private fun handleConnection(socket: Socket, handler: (TestExchange) -> Unit) {
+        val input = socket.getInputStream()
+        val reader = BufferedReader(InputStreamReader(input, Charsets.ISO_8859_1))
+
+        val requestLine = reader.readLine() ?: return
+        if (requestLine.isEmpty()) return
+
+        val headers = linkedMapOf<String, String>()
+        var contentLength = 0
+        while (true) {
+            val line = reader.readLine() ?: return
+            if (line.isEmpty()) break
+            val separator = line.indexOf(':')
+            if (separator > 0) {
+                val name = line.substring(0, separator).trim()
+                val value = line.substring(separator + 1).trim()
+                headers[name] = value
+                if (name.equals("Content-Length", ignoreCase = true)) {
+                    contentLength = value.toIntOrNull() ?: 0
+                }
+            }
+        }
+
+        val body = ByteArray(contentLength)
+        var offset = 0
+        while (offset < body.size) {
+            val count = input.read(body, offset, body.size - offset)
+            if (count < 0) break
+            offset += count
+        }
+
+        val exchange = TestExchange(headers, body.inputStream(), socket)
+        handler(exchange)
+    }
+
+    private fun respond(exchange: TestExchange, code: Int, body: String) {
+        val bytes = body.toByteArray(Charsets.UTF_8)
         exchange.sendResponseHeaders(code, bytes.size.toLong())
         exchange.responseBody.use { it.write(bytes) }
     }
@@ -43,7 +129,8 @@ class GroqClientTest {
     @Test fun successfulChatReturnsRealParsedText() = runBlocking {
         var receivedAuth: String? = null
         val url = startServer { exchange ->
-            receivedAuth = exchange.requestHeaders.getFirst("Authorization")
+            receivedAuth = exchange.requestHeaders.entries
+                .firstOrNull { it.key.equals("Authorization", ignoreCase = true) }?.value
             respond(exchange, 200, """{"choices":[{"message":{"role":"assistant","content":"Hello from Groq"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}""")
         }
         val client = GroqClient(apiKeyProvider = { "sk-real-test-key" }, endpoint = url)
