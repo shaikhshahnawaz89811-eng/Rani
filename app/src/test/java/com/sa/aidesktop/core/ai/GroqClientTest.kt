@@ -200,4 +200,58 @@ class GroqClientTest {
         assertTrue(capturedBody!!.contains("\"content\":\"hello\""))
     }
 
+    @Test fun payloadTooLarge413IsRetriedWithTrimmedMessagesThenSucceeds() = runBlocking {
+        val attempts = AtomicInteger(0)
+        var lastRequestMessageCount = -1
+        val url = startServer { request ->
+            val count = Regex("\"role\"").findAll(request.body).count()
+            lastRequestMessageCount = count
+            if (attempts.getAndIncrement() == 0) respond(request, 413, """{"error":{"message":"Request too large"}}""")
+            else respond(request, 200, """{"choices":[{"message":{"content":"recovered"}}]}""")
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chatConversation(
+            messages = listOf(
+                GroqMessage("user", "first old message"),
+                GroqMessage("assistant", "old reply"),
+                GroqMessage("user", "latest message")
+            ),
+            settings = GroqSettings(retryLimit = 1),
+            systemPrompt = null,
+            tools = emptyList()
+        )
+        assertTrue(result is GroqResult.Success)
+        assertEquals(2, attempts.get())
+        // The retry after 413 must have dropped the oldest message, not resent the same payload.
+        assertEquals(2, lastRequestMessageCount)
+    }
+
+    @Test fun payloadTooLargeExhaustsRetriesAndReportsFailure() = runBlocking {
+        val url = startServer { request -> respond(request, 413, """{"error":{"message":"still too large"}}""") }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chatConversation(
+            messages = listOf(GroqMessage("user", "a"), GroqMessage("user", "b"), GroqMessage("user", "c")),
+            settings = GroqSettings(retryLimit = 5),
+            systemPrompt = null,
+            tools = emptyList()
+        )
+        assertTrue((result as GroqResult.Failure).error is GroqError.PayloadTooLarge)
+    }
+
+    @Test fun contextLengthWordedHttp400IsTreatedAsPayloadTooLarge() = runBlocking {
+        val url = startServer { request ->
+            respond(request, 400, """{"error":{"message":"This model's maximum context length is exceeded, please reduce the length of the messages"}}""")
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
+        assertTrue((result as GroqResult.Failure).error is GroqError.PayloadTooLarge)
+    }
+
+    @Test fun unrelatedHttp400StaysGenericHttpError() = runBlocking {
+        val url = startServer { request -> respond(request, 400, """{"error":{"message":"Invalid request: bad JSON schema"}}""") }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 0), null, emptyList())
+        assertTrue((result as GroqResult.Failure).error is GroqError.Http)
+    }
+
 }

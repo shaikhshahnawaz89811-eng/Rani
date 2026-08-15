@@ -31,7 +31,7 @@ class TaskEngine(
                 AgentTaskState.EXECUTING, AgentTaskState.VERIFYING, AgentTaskState.WAITING_FOR_APPROVAL,
                 AgentTaskState.WAITING_FOR_AUTH, AgentTaskState.WAITING_FOR_USER,
                 AgentTaskState.RETRYING, AgentTaskState.PAUSED
-            )) return reconcileAndResume(existing, context)
+            )) return reconcileAndResume(existing, context, userContinuation = request)
 
         cancelled = false; paused = false
         val record = AgentTaskRecord(
@@ -106,11 +106,28 @@ class TaskEngine(
         else runLoop(next, context)
     }
 
-    private suspend fun reconcileAndResume(record: AgentTaskRecord, context: ProjectContext): TaskRunResult {
+    private suspend fun reconcileAndResume(
+        record: AgentTaskRecord,
+        context: ProjectContext,
+        userContinuation: String? = null
+    ): TaskRunResult {
         // The saved state is evidence of what was requested, not proof that it completed.
         // Ask the same reasoning layer to reconcile the live project/browser/Git state first.
         cancelled = false; paused = false
-        val reconciled = record.copy(
+        // BUG FIX: when the app resumes a paused/waiting task because the user sent a new chat
+        // message, that message was previously discarded entirely (only the old saved `record`
+        // was reconciled). If the user actually typed something new (different from the original
+        // request that is already stored), it is real information from the human and must reach
+        // the model — folded into relevantContext, the same field buildPrompt already reads.
+        val withUserReply = if (!userContinuation.isNullOrBlank() && userContinuation != record.request) {
+            record.copy(
+                relevantContext = bounded(
+                    (record.relevantContext + "\nUser follow-up message: " + userContinuation).takeLast(14_000),
+                    14_000
+                )
+            )
+        } else record
+        val reconciled = withUserReply.copy(
             state = AgentTaskState.INSPECTING,
             currentOperation = "Reconcile live state before resuming",
             updatedAt = System.currentTimeMillis()
@@ -239,6 +256,15 @@ class TaskEngine(
         appendLine("Iteration: ${record.iteration}/$maxIterations")
         appendLine("Workspace: ${record.workspaceRoot.ifBlank { "not selected" }}")
         appendLine("Last real result: ${bounded(record.lastToolResult, 7000)}")
+        // BUG FIX: relevantContext was accumulated across every iteration (tool outputs, prior
+        // reasoning, and now the user's own follow-up messages) and persisted to disk, but this
+        // prompt never actually read it back — the model only ever saw the single most recent
+        // lastToolResult. That silently threw away real accumulated context, including any new
+        // message the user typed while a task was paused/waiting. Capped independently of
+        // lastToolResult so this stays a bounded addition, not a duplicate of it.
+        if (record.relevantContext.isNotBlank()) {
+            appendLine("Accumulated context (tool history / user follow-ups): ${bounded(record.relevantContext, 4000)}")
+        }
         appendLine("Completed operations: ${record.completedOperations.takeLast(40).joinToString()}")
         appendLine("Reconciliation required: $reconciliation")
         appendLine("If user input/auth/approval is required, stop and state exactly what is needed.")
@@ -262,7 +288,6 @@ class TaskEngine(
         text.contains("inspect", true) || text.contains("read", true) -> AgentTaskState.INSPECTING
         else -> AgentTaskState.ANALYZING
     }
-    private fun classifyWaiting(): AgentTaskState = AgentTaskState.WAITING_FOR_APPROVAL
     private enum class FailureClass { USER_INPUT_REQUIRED, AUTH_REQUIRED, NETWORK_RETRYABLE, TOOL_FAILURE, UNRECOVERABLE_ERROR }
     private fun classify(e: AIError): FailureClass = when (e) {
         is AIError.ToolDenied -> FailureClass.USER_INPUT_REQUIRED

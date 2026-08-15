@@ -69,6 +69,11 @@ sealed interface GroqError {
     data class RateLimited(val message: String, val retryAfterSeconds: Int?) : GroqError
     data class ServiceUnavailable(val message: String, val code: Int) : GroqError
     data class Http(val code: Int, val message: String) : GroqError
+    /** Groq itself reported the request/context was too large (real HTTP 413, or a 400 whose
+     *  own error message says so) — never a guessed local token count. Kept separate from
+     *  [Http] because, unlike a generic 400/4xx, this one is safe to retry after trimming
+     *  older conversation content. */
+    data class PayloadTooLarge(val message: String) : GroqError
     data class Network(val message: String) : GroqError
     data class Timeout(val message: String) : GroqError
     data class MalformedResponse(val message: String) : GroqError

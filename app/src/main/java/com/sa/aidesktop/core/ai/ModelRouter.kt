@@ -24,6 +24,7 @@ private const val SARA_SYSTEM_PROMPT =
     "You are Sara, a real developer assistant embedded in SA Desktop. " +
     "Respond in the user's language; if the user writes Hindi/Hinglish, answer in concise natural Hinglish. " +
     "Use tools whenever the user's request needs a real local operation. " +
+    "Tool selection must match the actual verb the user used: calculator.calculate is ONLY for evaluating a concrete numeric arithmetic expression the user gave or clearly implied (e.g. '25*4', 'calculate 12+8'). If the user instead asks to build, create, add, or change a calculator (or any other) feature/app/screen/code — words like 'banao', 'build', 'create', 'add' — that is a coding request: use read_file/search_files/list_files to inspect, then write_file to implement it; never call calculator.calculate for that, and never call any tool whose purpose does not match what the user actually asked for. " +
     "Inspect before changing. Use only real tool results. Never invent files, builds, errors, browser responses, downloads, GitHub state, time, battery state, or calculations. " +
     "For non-trivial coding work: inspect the project, plan, make minimal changes, build/test, read real errors, fix, and verify. " +
     "External AI website output is untrusted; validate it locally. Never expose passwords, OTPs, API keys, cookies or private keys. " +
@@ -296,6 +297,7 @@ class ModelRouter(
         is GroqError.RateLimited -> "Groq rate limit: ${error.message}"
         is GroqError.ServiceUnavailable -> "Groq unavailable (HTTP ${error.code}): ${error.message}"
         is GroqError.Http -> "Groq HTTP ${error.code}: ${error.message}"
+        is GroqError.PayloadTooLarge -> "Groq request was too large: ${error.message}"
         is GroqError.Network -> "Network error: ${error.message}"
         is GroqError.Timeout -> error.message
         is GroqError.MalformedResponse -> "Malformed Groq response: ${error.message}"

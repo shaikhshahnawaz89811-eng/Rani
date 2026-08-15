@@ -75,17 +75,29 @@ class GroqClient(
 
         val clamped = settings.clamped()
         var attempt = 0
+        var workingMessages = messages
         var lastFailure: GroqResult.Failure =
             GroqResult.Failure(GroqError.Network("No attempt was made."))
         while (attempt <= clamped.retryLimit) {
-            when (val outcome = attemptOnce(apiKey, messages, systemPrompt, tools, clamped)) {
+            when (val outcome = attemptOnce(apiKey, workingMessages, systemPrompt, tools, clamped)) {
                 is GroqResult.Success -> return@withContext outcome
                 is GroqResult.Failure -> {
                     lastFailure = outcome
                     if (!isRetryable(outcome.error) || attempt == clamped.retryLimit) {
                         return@withContext outcome
                     }
-                    delay(RETRY_BACKOFF_MS * (attempt + 1))
+                    if (outcome.error is GroqError.PayloadTooLarge) {
+                        val trimmed = trimOldestMessage(workingMessages)
+                        if (trimmed.size == workingMessages.size) {
+                            // Nothing left to drop (down to the last message already) — retrying
+                            // would just repeat the same failure, so stop now instead of burning
+                            // the rest of the retry budget.
+                            return@withContext outcome
+                        }
+                        workingMessages = trimmed
+                    } else {
+                        delay(RETRY_BACKOFF_MS * (attempt + 1))
+                    }
                 }
             }
             attempt++
@@ -95,7 +107,19 @@ class GroqClient(
 
     private fun isRetryable(error: GroqError): Boolean = when (error) {
         is GroqError.RateLimited, is GroqError.ServiceUnavailable, is GroqError.Timeout -> true
+        // Retrying PayloadTooLarge only helps because chatConversation trims the messages before
+        // the next attempt (see below) — retrying the identical oversized payload would just fail
+        // again the same way.
+        is GroqError.PayloadTooLarge -> true
         else -> false
+    }
+
+    /** Rule 2 reactive-trim helper: drops the oldest message that is not the very last one, so the
+     *  most recent turn (what the user is actually waiting on) is always preserved. Never guesses
+     *  a token budget — only called after Groq itself has reported the payload as too large. */
+    private fun trimOldestMessage(messages: List<GroqMessage>): List<GroqMessage> {
+        if (messages.size <= 1) return messages
+        return messages.drop(1)
     }
 
     private fun attemptOnce(
@@ -210,6 +234,12 @@ class GroqClient(
                     null
                 )
             )
+            413 -> return GroqResult.Failure(
+                GroqError.PayloadTooLarge(
+                    extractErrorMessage(response.body)
+                        ?: "Groq rejected the request as too large (HTTP 413)."
+                )
+            )
         }
         if (response.statusCode in 500..599) {
             return GroqResult.Failure(
@@ -220,11 +250,21 @@ class GroqClient(
             )
         }
         if (response.statusCode !in 200..299) {
+            // A 413 is the unambiguous "too large" signal, but Groq (OpenAI-compatible) can also
+            // report an oversized context as a plain 400 with wording like "context_length_exceeded"
+            // or "reduce the length of the messages" in the real error body — read from the
+            // response itself, never guessed, so a plain unrelated 400 still falls through to Http.
+            val bodyMessage = extractErrorMessage(response.body)
+            if (response.statusCode == 400 && bodyMessage != null &&
+                Regex("context.?length|too large|reduce the length|maximum context", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(bodyMessage)
+            ) {
+                return GroqResult.Failure(GroqError.PayloadTooLarge(bodyMessage))
+            }
             return GroqResult.Failure(
                 GroqError.Http(
                     response.statusCode,
-                    extractErrorMessage(response.body)
-                        ?: "Groq request failed (HTTP ${response.statusCode})."
+                    bodyMessage ?: "Groq request failed (HTTP ${response.statusCode})."
                 )
             )
         }
