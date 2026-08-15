@@ -60,6 +60,11 @@ abstract class BrowserTool(
 ) : AITool {
     override val risk: ToolRisk get() = defaultRisk
 
+    // The browser tools can resolve the currently active browser window themselves, so the model
+    // should not be forced to invent an internal window id.
+    override val requiredParameters: Set<String>
+        get() = parameterHints.keys.filterNot { it == "window_id" }.toSet()
+
     protected fun windowId(input: Map<String, String>): String? =
         input["window_id"]?.takeIf { it.isNotBlank() }
             ?: windowManager.windows.lastOrNull { it.type == WindowType.BROWSER && it.state.name != "MINIMIZED" }?.id
@@ -152,6 +157,17 @@ class BrowserElementTool(
         "download" -> mapOf("url" to "Optional direct HTTP(S) URL; defaults to current page URL", "window_id" to "Browser window id")
         else -> mapOf("ref" to "Current element ref from browser.inspect", "window_id" to "Browser window id")
     }
+    override val requiredParameters: Set<String>
+        get() = when (action) {
+            "type" -> setOf("ref", "text")
+            "clear" -> setOf("ref")
+            "select" -> setOf("ref", "value")
+            "check" -> setOf("ref", "checked")
+            "scroll" -> setOf("direction")
+            "upload" -> setOf("ref", "file_path")
+            "download" -> emptySet()
+            else -> setOf("ref")
+        }
     override suspend fun execute(input: Map<String, String>): AIResult<ToolResult> {
         val id = windowId(input) ?: return AIResult.Failure(com.sa.aidesktop.core.ai.AIError.Execution("No browser window is open."))
         val ref = input["ref"].orEmpty()

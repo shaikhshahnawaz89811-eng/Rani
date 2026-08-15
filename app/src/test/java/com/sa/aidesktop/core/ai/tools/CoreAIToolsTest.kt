@@ -57,4 +57,15 @@ class CoreAIToolsTest {
         val tool = TerminalRunTool(EmbeddedTerminalService(workspace))
         assertTrue(tool.execute(mapOf("command" to "  ")) is AIResult.Failure)
     }
+    @Test fun calculatorUsesRealArithmeticWithoutCodeExecution() = runBlocking {
+        val tool = CalculatorTool()
+        val result = tool.execute(mapOf("expression" to "(25*4)+10/2")) as AIResult.Success
+        assertEquals("(25*4)+10/2 = 105", result.value.output)
+    }
+
+    @Test fun calculatorRejectsDivisionByZero() = runBlocking {
+        val result = CalculatorTool().execute(mapOf("expression" to "10/0"))
+        assertTrue(result is AIResult.Failure)
+    }
+
 }

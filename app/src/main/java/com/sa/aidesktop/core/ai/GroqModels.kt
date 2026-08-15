@@ -45,6 +45,14 @@ data class GroqUsage(val promptTokens: Int?, val completionTokens: Int?, val tot
 /** A tool call the model asked to make, decoded from choices[0].message.tool_calls. */
 data class GroqToolCall(val id: String, val name: String, val arguments: Map<String, String>)
 
+data class GroqMessage(
+    val role:String,
+    val content:String,
+    val toolCalls:List<GroqToolCall> = emptyList(),
+    val toolCallId:String? = null,
+    val name:String? = null
+)
+
 data class GroqChatResult(
     val text: String,
     val toolCalls: List<GroqToolCall> = emptyList(),
@@ -74,7 +82,7 @@ sealed interface GroqResult {
 /** Describes a Phase-1 tool for Groq's OpenAI-compatible function-calling schema. Parameter
  *  names/descriptions come from the real [AITool.parameterHints] of the tool being exposed —
  *  this file never invents a tool or a parameter that isn't actually implemented. */
-data class ToolDescriptor(val name: String, val description: String, val parameters: Map<String, String>)
+data class ToolDescriptor(val name: String, val description: String, val parameters: Map<String, String>, val requiredParameters: Set<String> = parameters.keys)
 
 /** Minimal HTTP abstraction so GroqClient's request/response handling can be exercised against
  *  a real loopback HTTP server in unit tests, without touching the network in production code
@@ -96,4 +104,20 @@ interface GroqChatEngine {
         systemPrompt: String?,
         tools: List<ToolDescriptor>
     ): GroqResult
+
+    /**
+     * Conversation-aware variant used by the real router. The default implementation preserves
+     * compatibility with simple test doubles by delegating to the single-prompt method.
+     */
+    suspend fun chatConversation(
+        messages: List<GroqMessage>,
+        settings: GroqSettings,
+        systemPrompt: String?,
+        tools: List<ToolDescriptor>
+    ): GroqResult = chat(
+        messages.lastOrNull { it.role == "user" }?.content.orEmpty(),
+        settings,
+        systemPrompt,
+        tools
+    )
 }

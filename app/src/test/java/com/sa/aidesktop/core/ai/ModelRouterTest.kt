@@ -14,6 +14,52 @@ private class FakeEngine(private val result: GroqResult) : GroqChatEngine {
         callCount++
         return result
     }
+    @Test fun registeredReadOnlyToolResultIsFedBackThroughConversationLoop() = runBlocking {
+        val files = InMemoryProjectFileService()
+        files.write("hello.txt", "Rahul")
+        val captured = mutableListOf<List<GroqMessage>>()
+        val engine = object : GroqChatEngine {
+            private var round = 0
+            override suspend fun chat(
+                prompt: String,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ) = GroqResult.Success(GroqChatResult("unused"))
+
+            override suspend fun chatConversation(
+                messages: List<GroqMessage>,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ): GroqResult {
+                captured += messages
+                return if (round++ == 0) {
+                    GroqResult.Success(
+                        GroqChatResult(
+                            text = "",
+                            toolCalls = listOf(
+                                GroqToolCall("call_1", "read_file", mapOf("path" to "hello.txt"))
+                            )
+                        )
+                    )
+                } else {
+                    GroqResult.Success(GroqChatResult("The file says Rahul."))
+                }
+            }
+        }
+        val router = ModelRouter(
+            engine,
+            UnavailableOfflineAI(),
+            hasApiKey = { true },
+            settingsProvider = { GroqSettings() },
+            toolRegistry = ToolRegistry(listOf(ReadFileTool(files)))
+        )
+        val result = router.chat(AIRequest("read hello.txt")) as AIResult.Success
+        assertEquals("The file says Rahul.", result.value.text)
+        assertTrue(captured[1].any { it.role == "tool" && it.toolCallId == "call_1" && it.content.contains("Rahul") })
+    }
+
 }
 
 
@@ -22,6 +68,52 @@ private class FakeEngineSequence(private val results: List<GroqResult>) : GroqCh
     override suspend fun chat(prompt: String, settings: GroqSettings, systemPrompt: String?, tools: List<ToolDescriptor>): GroqResult {
         return results[(index++).coerceAtMost(results.lastIndex)]
     }
+    @Test fun registeredReadOnlyToolResultIsFedBackThroughConversationLoop() = runBlocking {
+        val files = InMemoryProjectFileService()
+        files.write("hello.txt", "Rahul")
+        val captured = mutableListOf<List<GroqMessage>>()
+        val engine = object : GroqChatEngine {
+            private var round = 0
+            override suspend fun chat(
+                prompt: String,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ) = GroqResult.Success(GroqChatResult("unused"))
+
+            override suspend fun chatConversation(
+                messages: List<GroqMessage>,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ): GroqResult {
+                captured += messages
+                return if (round++ == 0) {
+                    GroqResult.Success(
+                        GroqChatResult(
+                            text = "",
+                            toolCalls = listOf(
+                                GroqToolCall("call_1", "read_file", mapOf("path" to "hello.txt"))
+                            )
+                        )
+                    )
+                } else {
+                    GroqResult.Success(GroqChatResult("The file says Rahul."))
+                }
+            }
+        }
+        val router = ModelRouter(
+            engine,
+            UnavailableOfflineAI(),
+            hasApiKey = { true },
+            settingsProvider = { GroqSettings() },
+            toolRegistry = ToolRegistry(listOf(ReadFileTool(files)))
+        )
+        val result = router.chat(AIRequest("read hello.txt")) as AIResult.Success
+        assertEquals("The file says Rahul.", result.value.text)
+        assertTrue(captured[1].any { it.role == "tool" && it.toolCallId == "call_1" && it.content.contains("Rahul") })
+    }
+
 }
 
 class ModelRouterTest {
@@ -82,13 +174,75 @@ class ModelRouterTest {
         assertEquals(RouterTier.ONLINE_GROQ, router.currentStatus().lastTier)
     }
 
-    @Test fun unknownToolNameFromGroqIsDroppedNotFabricated() = runBlocking {
-        val engine = FakeEngine(GroqResult.Success(GroqChatResult(
-            text = "",
-            toolCalls = listOf(GroqToolCall("call_1", "browser_click", mapOf("selector" to "#submit")))
-        )))
-        val router = ModelRouter(engine, UnavailableOfflineAI(), hasApiKey = { true }, settingsProvider = { GroqSettings() }, toolRegistry = registry())
+    @Test fun unknownToolNameIsNotExecutedAndProviderCanRecover() = runBlocking {
+        val engine = FakeEngineSequence(
+            listOf(
+                GroqResult.Success(
+                    GroqChatResult(
+                        text = "",
+                        toolCalls = listOf(
+                            GroqToolCall("call_1", "browser_click", mapOf("selector" to "#submit"))
+                        )
+                    )
+                ),
+                GroqResult.Success(GroqChatResult("I cannot execute that unregistered tool."))
+            )
+        )
+        val router = ModelRouter(
+            engine,
+            UnavailableOfflineAI(),
+            hasApiKey = { true },
+            settingsProvider = { GroqSettings() },
+            toolRegistry = registry()
+        )
         val result = router.chat(AIRequest("click submit")) as AIResult.Success
         assertTrue(result.value.toolRequests.isEmpty())
+        assertTrue(result.value.toolTrace.any { it.contains("NOT REGISTERED") })
     }
+    @Test fun registeredReadOnlyToolResultIsFedBackThroughConversationLoop() = runBlocking {
+        val files = InMemoryProjectFileService()
+        files.write("hello.txt", "Rahul")
+        val captured = mutableListOf<List<GroqMessage>>()
+        val engine = object : GroqChatEngine {
+            private var round = 0
+            override suspend fun chat(
+                prompt: String,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ) = GroqResult.Success(GroqChatResult("unused"))
+
+            override suspend fun chatConversation(
+                messages: List<GroqMessage>,
+                settings: GroqSettings,
+                systemPrompt: String?,
+                tools: List<ToolDescriptor>
+            ): GroqResult {
+                captured += messages
+                return if (round++ == 0) {
+                    GroqResult.Success(
+                        GroqChatResult(
+                            text = "",
+                            toolCalls = listOf(
+                                GroqToolCall("call_1", "read_file", mapOf("path" to "hello.txt"))
+                            )
+                        )
+                    )
+                } else {
+                    GroqResult.Success(GroqChatResult("The file says Rahul."))
+                }
+            }
+        }
+        val router = ModelRouter(
+            engine,
+            UnavailableOfflineAI(),
+            hasApiKey = { true },
+            settingsProvider = { GroqSettings() },
+            toolRegistry = ToolRegistry(listOf(ReadFileTool(files)))
+        )
+        val result = router.chat(AIRequest("read hello.txt")) as AIResult.Success
+        assertEquals("The file says Rahul.", result.value.text)
+        assertTrue(captured[1].any { it.role == "tool" && it.toolCallId == "call_1" && it.content.contains("Rahul") })
+    }
+
 }

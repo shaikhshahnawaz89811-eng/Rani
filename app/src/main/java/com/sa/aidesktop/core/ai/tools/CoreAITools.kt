@@ -26,7 +26,8 @@ class WriteFileTool(private val files:FileService):AITool{
  *  FileService (no duplicate/new file backend). */
 class ListFilesTool(private val files:FileService):AITool{
     override val id="list_files";override val description="List files and folders inside a directory of the controlled project workspace.";override val risk=ToolRisk.READ_ONLY
-    override val parameterHints=mapOf("path" to "Workspace-relative directory path; empty lists the workspace root")
+    override val parameterHints=mapOf("path" to "Optional workspace-relative directory path; empty lists the workspace root")
+    override val requiredParameters = emptySet<String>()
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
         val path=input["path"]?.trim().orEmpty()
         val r=files.listDirectory(path)

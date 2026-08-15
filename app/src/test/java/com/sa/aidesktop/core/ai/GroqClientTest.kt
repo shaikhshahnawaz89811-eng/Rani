@@ -167,4 +167,37 @@ class GroqClientTest {
         val result = client.chat("hi", GroqSettings(timeoutMs = 300, retryLimit = 0), null, emptyList())
         assertTrue((result as GroqResult.Failure).error is GroqError.Timeout)
     }
+    @Test fun conversationRequestPreservesAssistantAndToolMessages() = runBlocking {
+        var capturedBody: String? = null
+        val url = startServer { request ->
+            capturedBody = request.body
+            respond(request, 200, """{"choices":[{"message":{"content":"done"}}]}""")
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        client.chatConversation(
+            messages = listOf(
+                GroqMessage("user", "read file"),
+                GroqMessage(
+                    "assistant",
+                    "",
+                    toolCalls = listOf(GroqToolCall("call_1", "read_file", mapOf("path" to "a.txt")))
+                ),
+                GroqMessage(
+                    "tool",
+                    "hello",
+                    toolCallId = "call_1",
+                    name = "read_file"
+                )
+            ),
+            settings = GroqSettings(),
+            systemPrompt = "system",
+            tools = listOf(ToolDescriptor("read_file", "Read", mapOf("path" to "file")))
+        )
+        assertTrue(capturedBody!!.contains("\"role\":\"assistant\""))
+        assertTrue(capturedBody!!.contains("\"tool_calls\""))
+        assertTrue(capturedBody!!.contains("\"tool_call_id\":\"call_1\""))
+        assertTrue(capturedBody!!.contains("\"name\":\"read_file\""))
+        assertTrue(capturedBody!!.contains("\"content\":\"hello\""))
+    }
+
 }

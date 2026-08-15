@@ -55,19 +55,36 @@ class GroqClient(
         settings: GroqSettings,
         systemPrompt: String?,
         tools: List<ToolDescriptor>
+    ): GroqResult = chatConversation(
+        messages = listOf(GroqMessage("user", prompt)),
+        settings = settings,
+        systemPrompt = systemPrompt,
+        tools = tools
+    )
+
+    override suspend fun chatConversation(
+        messages: List<GroqMessage>,
+        settings: GroqSettings,
+        systemPrompt: String?,
+        tools: List<ToolDescriptor>
     ): GroqResult = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return@withContext GroqResult.Failure(GroqError.MissingApiKey("Groq API key is not configured. Add it in Settings."))
+            ?: return@withContext GroqResult.Failure(
+                GroqError.MissingApiKey("Groq API key is not configured. Add it in Settings.")
+            )
 
         val clamped = settings.clamped()
         var attempt = 0
-        var lastFailure: GroqResult.Failure = GroqResult.Failure(GroqError.Network("No attempt was made."))
+        var lastFailure: GroqResult.Failure =
+            GroqResult.Failure(GroqError.Network("No attempt was made."))
         while (attempt <= clamped.retryLimit) {
-            when (val outcome = attemptOnce(apiKey, prompt, systemPrompt, tools, clamped)) {
+            when (val outcome = attemptOnce(apiKey, messages, systemPrompt, tools, clamped)) {
                 is GroqResult.Success -> return@withContext outcome
                 is GroqResult.Failure -> {
                     lastFailure = outcome
-                    if (!isRetryable(outcome.error) || attempt == clamped.retryLimit) return@withContext outcome
+                    if (!isRetryable(outcome.error) || attempt == clamped.retryLimit) {
+                        return@withContext outcome
+                    }
                     delay(RETRY_BACKOFF_MS * (attempt + 1))
                 }
             }
@@ -83,12 +100,12 @@ class GroqClient(
 
     private fun attemptOnce(
         apiKey: String,
-        prompt: String,
+        messages: List<GroqMessage>,
         systemPrompt: String?,
         tools: List<ToolDescriptor>,
         settings: GroqSettings
     ): GroqResult {
-        val payload = buildRequestBody(prompt, systemPrompt, tools, settings)
+        val payload = buildRequestBody(messages, systemPrompt, tools, settings)
         val headers = mapOf(
             "Authorization" to "Bearer $apiKey",
             "Content-Type" to "application/json"
@@ -96,23 +113,58 @@ class GroqClient(
         val response = try {
             transport.post(endpoint, headers, payload, settings.timeoutMs, settings.timeoutMs)
         } catch (e: SocketTimeoutException) {
-            return GroqResult.Failure(GroqError.Timeout("Groq request timed out after ${settings.timeoutMs}ms"))
+            return GroqResult.Failure(
+                GroqError.Timeout("Groq request timed out after ${settings.timeoutMs}ms")
+            )
         } catch (e: IOException) {
-            return GroqResult.Failure(GroqError.Network(e.message ?: "Network error contacting Groq"))
+            return GroqResult.Failure(
+                GroqError.Network(e.message ?: "Network error contacting Groq")
+            )
         }
         return parseResponse(response)
     }
 
-    private fun buildRequestBody(prompt: String, systemPrompt: String?, tools: List<ToolDescriptor>, settings: GroqSettings): String {
-        val messages = JSONArray()
+    private fun buildRequestBody(
+        messages: List<GroqMessage>,
+        systemPrompt: String?,
+        tools: List<ToolDescriptor>,
+        settings: GroqSettings
+    ): String {
+        val messageArray = JSONArray()
         if (!systemPrompt.isNullOrBlank()) {
-            messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
+            messageArray.put(JSONObject().put("role", "system").put("content", systemPrompt))
         }
-        messages.put(JSONObject().put("role", "user").put("content", prompt))
+        messages.forEach { message ->
+            val json = JSONObject()
+                .put("role", message.role)
+                .put("content", message.content)
+            if (!message.name.isNullOrBlank()) json.put("name", message.name)
+            if (!message.toolCallId.isNullOrBlank()) json.put("tool_call_id", message.toolCallId)
+            if (message.toolCalls.isNotEmpty()) {
+                val calls = JSONArray()
+                message.toolCalls.forEach { call ->
+                    val arguments = JSONObject()
+                    call.arguments.forEach { (key, value) -> arguments.put(key, value) }
+                    calls.put(
+                        JSONObject()
+                            .put("id", call.id)
+                            .put("type", "function")
+                            .put(
+                                "function",
+                                JSONObject()
+                                    .put("name", call.name)
+                                    .put("arguments", arguments.toString())
+                            )
+                    )
+                }
+                json.put("tool_calls", calls)
+            }
+            messageArray.put(json)
+        }
 
         val body = JSONObject()
             .put("model", settings.model)
-            .put("messages", messages)
+            .put("messages", messageArray)
         settings.maxOutputTokens?.let { body.put("max_tokens", it) }
 
         if (tools.isNotEmpty()) {
@@ -120,12 +172,18 @@ class GroqClient(
             tools.forEach { descriptor ->
                 val properties = JSONObject()
                 descriptor.parameters.forEach { (name, description) ->
-                    properties.put(name, JSONObject().put("type", "string").put("description", description))
+                    properties.put(
+                        name,
+                        JSONObject()
+                            .put("type", "string")
+                            .put("description", description)
+                    )
                 }
                 val parametersSchema = JSONObject()
                     .put("type", "object")
                     .put("properties", properties)
-                    .put("required", JSONArray(descriptor.parameters.keys.toList()))
+                    .put("required", JSONArray(descriptor.requiredParameters.toList()))
+                    .put("additionalProperties", false)
                 val function = JSONObject()
                     .put("name", descriptor.name)
                     .put("description", descriptor.description)
@@ -139,25 +197,55 @@ class GroqClient(
 
     private fun parseResponse(response: TransportResponse): GroqResult {
         when (response.statusCode) {
-            401, 403 -> return GroqResult.Failure(GroqError.InvalidApiKey(extractErrorMessage(response.body) ?: "Groq rejected the API key (HTTP ${response.statusCode})."))
-            429 -> return GroqResult.Failure(GroqError.RateLimited(extractErrorMessage(response.body) ?: "Groq rate limit reached (HTTP 429).", null))
+            401, 403 -> return GroqResult.Failure(
+                GroqError.InvalidApiKey(
+                    extractErrorMessage(response.body)
+                        ?: "Groq rejected the API key (HTTP ${response.statusCode})."
+                )
+            )
+            429 -> return GroqResult.Failure(
+                GroqError.RateLimited(
+                    extractErrorMessage(response.body)
+                        ?: "Groq rate limit reached (HTTP 429).",
+                    null
+                )
+            )
         }
         if (response.statusCode in 500..599) {
-            return GroqResult.Failure(GroqError.ServiceUnavailable(extractErrorMessage(response.body) ?: "Groq service unavailable.", response.statusCode))
+            return GroqResult.Failure(
+                GroqError.ServiceUnavailable(
+                    extractErrorMessage(response.body) ?: "Groq service unavailable.",
+                    response.statusCode
+                )
+            )
         }
         if (response.statusCode !in 200..299) {
-            return GroqResult.Failure(GroqError.Http(response.statusCode, extractErrorMessage(response.body) ?: "Groq request failed (HTTP ${response.statusCode})."))
+            return GroqResult.Failure(
+                GroqError.Http(
+                    response.statusCode,
+                    extractErrorMessage(response.body)
+                        ?: "Groq request failed (HTTP ${response.statusCode})."
+                )
+            )
         }
         return try {
             val json = JSONObject(response.body)
             val choice = json.optJSONArray("choices")?.optJSONObject(0)
-                ?: return GroqResult.Failure(GroqError.MalformedResponse("Groq response had no choices[0]."))
+                ?: return GroqResult.Failure(
+                    GroqError.MalformedResponse("Groq response had no choices[0].")
+                )
             val message = choice.optJSONObject("message")
-                ?: return GroqResult.Failure(GroqError.MalformedResponse("Groq response had no message."))
+                ?: return GroqResult.Failure(
+                    GroqError.MalformedResponse("Groq response had no message.")
+                )
             val text = if (message.isNull("content")) "" else message.optString("content", "")
             val toolCalls = parseToolCalls(message.optJSONArray("tool_calls"))
             if (text.isBlank() && toolCalls.isEmpty()) {
-                return GroqResult.Failure(GroqError.MalformedResponse("Groq response contained neither text nor a tool call."))
+                return GroqResult.Failure(
+                    GroqError.MalformedResponse(
+                        "Groq response contained neither text nor a tool call."
+                    )
+                )
             }
             val finishReason = choice.optString("finish_reason").ifBlank { null }
             val usage = json.optJSONObject("usage")?.let {
@@ -169,7 +257,9 @@ class GroqClient(
             }
             GroqResult.Success(GroqChatResult(text, toolCalls, usage, finishReason))
         } catch (e: JSONException) {
-            GroqResult.Failure(GroqError.MalformedResponse(e.message ?: "Could not parse Groq response JSON."))
+            GroqResult.Failure(
+                GroqError.MalformedResponse(e.message ?: "Could not parse Groq response JSON.")
+            )
         }
     }
 
@@ -185,7 +275,9 @@ class GroqClient(
             val argumentsRaw = function.optString("arguments", "{}")
             val arguments = try {
                 val obj = JSONObject(argumentsRaw)
-                obj.keys().asSequence().associateWith { key -> obj.optString(key, "") }
+                obj.keys().asSequence().associateWith { key ->
+                    obj.optString(key, "")
+                }
             } catch (e: JSONException) {
                 emptyMap()
             }
@@ -195,12 +287,14 @@ class GroqClient(
     }
 
     private fun extractErrorMessage(body: String): String? = try {
-        JSONObject(body).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+        JSONObject(body).optJSONObject("error")?.optString("message")
+            ?.takeIf { it.isNotBlank() }
     } catch (e: Exception) {
         null
     }
 
-    private fun JSONObject.optIntOrNull(key: String): Int? = if (has(key) && !isNull(key)) optInt(key) else null
+    private fun JSONObject.optIntOrNull(key: String): Int? =
+        if (has(key) && !isNull(key)) optInt(key) else null
 
     companion object {
         const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"

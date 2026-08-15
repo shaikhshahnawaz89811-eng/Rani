@@ -3,8 +3,17 @@ package com.sa.aidesktop.core.ai
 data class AIMessage(val text: String, val fromUser: Boolean, val time: String)
 data class AIProfile(val id:String,val name:String,val personality:String,val voiceId:String?,val language:String,val avatar:String?)
 data class ProjectContext(val relevantFiles:List<String> = emptyList(),val projectStructure:String = "",val selectedCode:String = "",val compilerErrors:List<String> = emptyList(),val testResults:List<String> = emptyList(),val gitChanges:List<String> = emptyList())
-data class AIRequest(val prompt:String,val context:ProjectContext = ProjectContext())
-data class AIResponse(val text:String,val toolRequests:List<ToolRequest> = emptyList())
+data class AIConversationMessage(val role:String,val text:String)
+data class AIRequest(
+    val prompt:String,
+    val context:ProjectContext = ProjectContext(),
+    val history:List<AIConversationMessage> = emptyList()
+)
+data class AIResponse(
+    val text:String,
+    val toolRequests:List<ToolRequest> = emptyList(),
+    val toolTrace:List<String> = emptyList()
+)
 sealed interface AIError { data class InvalidRequest(val message:String):AIError; data class ModelUnavailable(val message:String):AIError; data class ToolDenied(val message:String):AIError; data class Execution(val message:String):AIError }
 sealed interface AIResult<out T> { data class Success<T>(val value:T):AIResult<T>; data class Failure(val error:AIError):AIResult<Nothing> }
 interface LocalModelEngine { suspend fun generate(request:AIRequest):AIResult<AIResponse> }
@@ -22,8 +31,21 @@ interface AIService {
 enum class ToolRisk { READ_ONLY, WRITE, EXECUTION, GIT_SENSITIVE }
 data class ToolRequest(val toolId:String,val input:Map<String,String>,val risk:ToolRisk)
 data class ToolResult(val output:String,val changed:Boolean=false)
-interface AITool { val id:String; val description:String; val risk:ToolRisk; val parameterHints:Map<String,String> get()=emptyMap(); suspend fun execute(input:Map<String,String>):AIResult<ToolResult> }
-class ToolRegistry(private val tools:List<AITool>) { fun find(id:String)=tools.firstOrNull{it.id==id}; fun all()=tools.toList() }
+interface AITool { val id:String; val description:String; val risk:ToolRisk; val parameterHints:Map<String,String> get()=emptyMap(); val requiredParameters:Set<String> get()=parameterHints.keys; suspend fun execute(input:Map<String,String>):AIResult<ToolResult> }
+class ToolRegistry(initialTools:List<AITool>) {
+    private val tools = initialTools.toMutableList()
+
+    @Synchronized
+    fun register(tool:AITool) {
+        if (tools.none { it.id == tool.id }) tools.add(tool)
+    }
+
+    @Synchronized
+    fun find(id:String)=tools.firstOrNull{it.id==id}
+
+    @Synchronized
+    fun all()=tools.toList()
+}
 class PermissionGate { fun requiresApproval(risk:ToolRisk)=risk!=ToolRisk.READ_ONLY }
 
 class ToolExecutionGateway(private val registry:ToolRegistry,private val gate:PermissionGate=PermissionGate()) {
@@ -35,9 +57,8 @@ class ToolExecutionGateway(private val registry:ToolRegistry,private val gate:Pe
     }
 }
 
-/** Honest Phase-8 boundary: no real local inference runtime/model is present in this project.
- * This service never fabricates an offline answer. It returns an explicit unavailable error until
- * a genuine on-device runtime and model are integrated.
+/** Test/architecture adapter that deliberately reports offline AI as unavailable.
+ * Production uses LocalLlamaEngine when a genuine GGUF model is configured.
  */
 class UnavailableOfflineAI : AIService, LocalModelEngine {
     private fun unavailable(): AIResult<AIResponse> = AIResult.Failure(

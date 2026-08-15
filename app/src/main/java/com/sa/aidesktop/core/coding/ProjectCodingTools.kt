@@ -9,7 +9,8 @@ import java.io.File
 
 class ProjectInspectTreeTool(private val files: FileService): AITool {
     override val id="project.inspect_tree"; override val description="Inspect the real project tree with bounded depth/output."; override val risk=ToolRisk.READ_ONLY
-    override val parameterHints=mapOf("max_entries" to "Maximum entries to return, default 300")
+    override val parameterHints=mapOf("max_entries" to "Optional maximum entries to return, default 300")
+    override val requiredParameters=emptySet<String>()
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
         val max=input["max_entries"]?.toIntOrNull()?.coerceIn(1,1000)?:300
         val lines=mutableListOf<String>()
@@ -32,6 +33,7 @@ class ProjectDiscoverTool(private val workspaceManager:ProjectWorkspaceManager, 
 class ZipWorkspaceTool(private val workspaceManager:ProjectWorkspaceManager):AITool {
     override val id="project.extract_zip"; override val description="Safely extract a real ZIP into a separate workspace with path-traversal and size limits."; override val risk=ToolRisk.WRITE
     override val parameterHints=mapOf("zip_path" to "Absolute or app-accessible path to the real ZIP", "workspace_name" to "Optional new workspace name")
+    override val requiredParameters=setOf("zip_path")
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
         val path=input["zip_path"]?.trim().orEmpty(); if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("zip_path is required"))
         val name=input["workspace_name"]?.trim().takeUnless{it.isNullOrBlank()}?:"task-${System.currentTimeMillis()}"

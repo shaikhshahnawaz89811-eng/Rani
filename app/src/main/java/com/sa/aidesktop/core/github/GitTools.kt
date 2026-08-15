@@ -24,7 +24,8 @@ class GitDiffTool(private val git: com.sa.aidesktop.core.git.GitService): AITool
     override val id = "git.diff"
     override val description = "Inspect the real Git diff; use cached=true for staged changes."
     override val risk = ToolRisk.READ_ONLY
-    override val parameterHints = mapOf("cached" to "true to inspect staged diff, false for unstaged diff")
+    override val parameterHints = mapOf("cached" to "Optional: true for staged diff, false for unstaged diff")
+    override val requiredParameters = emptySet<String>()
     override suspend fun execute(input: Map<String, String>): AIResult<ToolResult> =
         git.diff(input["cached"]?.toBooleanStrictOrNull() == true).toAi("git.diff") { it }
 }
@@ -33,7 +34,8 @@ class GitLogTool(private val git: com.sa.aidesktop.core.git.GitService): AITool 
     override val id = "git.log"
     override val description = "Read the real recent Git history."
     override val risk = ToolRisk.READ_ONLY
-    override val parameterHints = mapOf("limit" to "Number of commits, bounded to 1-100")
+    override val parameterHints = mapOf("limit" to "Optional number of commits, bounded to 1-100")
+    override val requiredParameters = emptySet<String>()
     override suspend fun execute(input: Map<String, String>): AIResult<ToolResult> =
         git.log(input["limit"]?.toIntOrNull()?.coerceIn(1,100) ?: 20).toAi("git.log") { it }
 }
@@ -82,6 +84,7 @@ class GitFetchTool(private val git: com.sa.aidesktop.core.git.GitService): AIToo
     override val description = "Fetch real Git remote updates without changing tracked working files."
     override val risk = ToolRisk.EXECUTION
     override val parameterHints = mapOf("remote" to "Optional remote name")
+    override val requiredParameters = emptySet<String>()
     override suspend fun execute(input: Map<String, String>) =
         git.fetch(input["remote"]).toAi("git.fetch") { it }
 }
@@ -127,7 +130,8 @@ class GitBranchTool(private val git: com.sa.aidesktop.core.git.GitService): AITo
     override val id = "git.branch"
     override val description = "List real branches or create a new branch."
     override val risk = ToolRisk.WRITE
-    override val parameterHints = mapOf("name" to "Omit to list branches; provide a valid name to create a branch")
+    override val parameterHints = mapOf("name" to "Optional branch name; omit to list branches")
+    override val requiredParameters = emptySet<String>()
     override suspend fun execute(input: Map<String, String>) =
         git.branch(input["name"]?.trim()?.takeIf(String::isNotBlank)).toAi("git.branch") { it.joinToString("\n") }
 }
@@ -175,6 +179,7 @@ class GitHubCreateRepositoryTool(private val api: GitHubApiClient): AITool {
     override val description = "Create a real GitHub repository for the authenticated user."
     override val risk = ToolRisk.WRITE
     override val parameterHints = mapOf("name" to "Repository name", "description" to "Optional description", "private" to "true/false")
+    override val requiredParameters = setOf("name")
     override suspend fun execute(input: Map<String, String>) =
         api.createRepository(input["name"].orEmpty(), input["description"].orEmpty(), input["private"]?.toBooleanStrictOrNull() ?: true)
             .toAi("github.create_repository") { "${it.fullName}\nclone=${it.cloneUrl}\nurl=${it.htmlUrl}" }

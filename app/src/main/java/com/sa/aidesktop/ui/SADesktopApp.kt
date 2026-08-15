@@ -525,11 +525,17 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
     val transcript by stt.transcript.collectAsState()
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> if (granted) stt.start() }
     DisposableEffect(tts, stt) { onDispose { tts.release(); stt.release() } }
-    val tools = remember(files, terminal, browser) {
+    val tools = remember(files, terminal, browser, workspaceManager, gitRoot, githubAccounts, githubApi) {
         ToolRegistry(
             listOf(
+                // Core workspace tools
                 ReadFileTool(files), SearchFileTool(files), WriteFileTool(files), ListFilesTool(files),
                 TerminalRunTool(terminal), WindowControlTool(manager),
+
+                // Real device/read-only helpers
+                CalculatorTool(), DeviceTimeTool(), DeviceDateTool(), DeviceBatteryTool(context),
+
+                // Real browser tools
                 com.sa.aidesktop.core.browser.BrowserOpenTool(browser, manager),
                 com.sa.aidesktop.core.browser.BrowserNavigationTool("back", browser, manager),
                 com.sa.aidesktop.core.browser.BrowserNavigationTool("forward", browser, manager),
@@ -546,26 +552,55 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
                 com.sa.aidesktop.core.browser.BrowserElementTool("focus", browser, manager),
                 com.sa.aidesktop.core.browser.BrowserElementTool("download", browser, manager),
                 com.sa.aidesktop.core.browser.BrowserElementTool("upload", browser, manager),
+
+                // Real AI-website interaction through the current WebView
                 AIWebDetectTool(aiWeb), AIWebInspectTool(aiWeb), AIWebTypeTool(aiWeb), AIWebSendTool(aiWeb),
                 AIWebWaitTool(aiWeb), AIWebReadTool(aiWeb), AIWebUploadTool(aiWeb),
-                ProjectInspectTreeTool(files), ProjectDiscoverTool(workspaceManager, context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")),
+
+                // Project/coding tools
+                ProjectInspectTreeTool(files),
+                ProjectDiscoverTool(workspaceManager, context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")),
                 ZipWorkspaceTool(workspaceManager), BuildProjectTool(terminal),
+
+                // Real Git/GitHub tools
                 GitStatusTool(gitService), GitDiffTool(gitService), GitLogTool(gitService), GitRemoteTool(gitService),
                 GitInitTool(gitService), GitAddTool(gitService), GitCommitTool(gitService), GitFetchTool(gitService),
                 GitPushTool(gitService), GitPullTool(gitService), GitCloneTool(gitService), GitBranchTool(gitService),
                 GitCheckoutTool(gitService), GitMergeTool(gitService),
-                GitHubAccountStatusTool(githubAccounts), GitHubListRepositoriesTool(githubApi), GitHubCreateRepositoryTool(githubApi)
+                GitHubAccountStatusTool(githubAccounts), GitHubListRepositoriesTool(githubApi),
+                GitHubCreateRepositoryTool(githubApi)
             )
         )
     }
     val gate = remember { PermissionGate() }
     val gateway = remember(tools) { ToolExecutionGateway(tools, gate) }
-    val taskStore = remember(context) { CodingTaskStore(context.filesDir.resolve("SA-AIDesktop/tasks/active.properties")) }
-    // Phase 8 model router: real Groq when configured, with the real local GGUF LLM as fallback.
+    val taskStore = remember(context) {
+        CodingTaskStore(context.filesDir.resolve("SA-AIDesktop/tasks/active.properties"))
+    }
+
+    // Groq remains the online primary when a key exists. It uses the same registry/gateway as the
+    // local path; there is no second hidden tool system.
     val groqClient = remember { GroqClient(apiKeyProvider = { settingsStore.getApiKey() }) }
-    val router = remember(tools, offlineAi) { ModelRouter(groqClient, offlineAi, hasApiKey = { settingsStore.hasApiKey() }, settingsProvider = { settingsStore.toGroqSettings() }, toolRegistry = tools) }
+    val router = remember(tools, offlineAi) {
+        ModelRouter(
+            groqClient,
+            offlineAi,
+            hasApiKey = { settingsStore.hasApiKey() },
+            settingsProvider = { settingsStore.toGroqSettings() },
+            toolRegistry = tools
+        )
+    }
     val service: AIService = router
-    val taskEngine = remember(router, gateway, taskStore) { TaskEngine(router, gateway, taskStore) }
+    val taskEngine = remember(router, gateway, taskStore, tools) {
+        TaskEngine(router, gateway, taskStore).also { engine ->
+            // Task controls are registered after the engine exists, but the router/gateway hold the
+            // same mutable registry, so they immediately see these real tools.
+            tools.register(TaskStatusTool(engine))
+            tools.register(TaskCancelTool(engine))
+            tools.register(TaskPauseTool(engine))
+        }
+    }
+
     LaunchedEffect(taskEngine) {
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val task = taskEngine.current()
@@ -580,41 +615,124 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
         }
     }
     val scope = rememberCoroutineScope()
-    var input by remember{mutableStateOf("")}
-    var busy by remember{mutableStateOf(false)}
-    var pending by remember{mutableStateOf<ToolRequest?>(null)}
-    var pendingTaskId by remember{mutableStateOf<String?>(null)}
-    var tier by remember{mutableStateOf<RouterTier?>(null)}
+    var input by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<ToolRequest?>(null) }
+    var pendingTaskId by remember { mutableStateOf<String?>(null) }
+    var pendingChatPrompt by remember { mutableStateOf<String?>(null) }
+    var tier by remember { mutableStateOf<RouterTier?>(null) }
+    var lastToolTrace by remember { mutableStateOf<List<String>>(emptyList()) }
+
     LaunchedEffect(transcript) { if (transcript.isNotBlank()) input = transcript }
-    val profile = remember { AIProfile("sara", "Sara", "calm developer assistant", "default", "Hinglish", "sara") }
-    val msgs=remember{mutableStateListOf(
-        AIMessage("Hello! I'm ${profile.name}\n${if(settingsStore.hasApiKey()) "Groq is configured — I'll use it, and fall back to the real offline model is unavailable only if a request fails." else "No Groq key is configured. I'll use the local GGUF model if one is configured; otherwise I'll report that offline AI is unavailable."}",false,"Now"),
-        AIMessage("Main project context ko need ke hisaab se use karungi. File changes aur sensitive actions approval ke bina apply nahi honge.",false,"Now")
-    )}
-    fun send(){
-        val p=input.trim(); if(p.isBlank() || busy) return
-        msgs.add(AIMessage(p,true,"Now")); input=""; busy=true
-        val isTask = Regex("(?i)(project|zip|build|fix|modify|change|commit|push|github|claude|chatgpt|gemini|upload|download|calculator|app banao|code)").containsMatchIn(p)
+
+    val profile = remember {
+        AIProfile("sara", "Sara", "calm developer assistant", "default", "Hinglish", "sara")
+    }
+    val msgs = remember {
+        mutableStateListOf(
+            AIMessage(
+                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured as the online primary; real local GGUF is the fallback." else "No Groq key is configured; real local GGUF is used when installed."}",
+                false,
+                "Now"
+            ),
+            AIMessage(
+                "Main sirf real tool results claim karungi. File/Git/browser/terminal changes approval ke bina apply nahi honge.",
+                false,
+                "Now"
+            )
+        )
+    }
+
+    fun conversationHistory(current: String): List<AIConversationMessage> {
+        return msgs.takeLast(10).map {
+            AIConversationMessage(if (it.fromUser) "user" else "assistant", it.text)
+        }.filter { it.text.isNotBlank() } + AIConversationMessage("user", current)
+    }
+
+    fun isAgentTaskRequest(prompt: String): Boolean =
+        Regex(
+            "(?i)\\b(" +
+                "fix\\s+(this|the)?\\s*(project|bug|error)|" +
+                "build\\s+(this|the)?\\s*(project|app)|" +
+                "run\\s+(the\\s+)?(build|tests)|" +
+                "modify\\s+file|change\\s+file|edit\\s+file|" +
+                "commit\\s+(these|the|my)?\\s*changes|" +
+                "push\\s+(these|the|my)?\\s*(changes|code)|" +
+                "pull\\s+(the|latest)?\\s*changes|" +
+                "clone\\s+(this|the)?\\s*(repo|repository)|" +
+                "create\\s+(a\\s+)?github\\s+repo|" +
+                "extract\\s+(this\\s+)?zip|" +
+                "autonomous\\s+task|agent\\s+task" +
+            ")\\b"
+        ).containsMatchIn(prompt)
+
+    fun send() {
+        val p = input.trim()
+        if (p.isBlank() || busy) return
+
+        val history = conversationHistory(p)
+        msgs.add(AIMessage(p, true, "Now"))
+        input = ""
+        busy = true
+        pending = null
+        pendingTaskId = null
+        pendingChatPrompt = null
+        lastToolTrace = emptyList()
+
         scope.launch {
-            if(isTask){
-                val run=taskEngine.start(p, ProjectContext(projectStructure="MyProject workspace"))
-                msgs.add(AIMessage("Agent task started: ${run.record.taskId}",false,"Now"))
-                pending=run.pendingTool
-                pendingTaskId=run.pendingTool?.let { run.record.taskId }
+            if (isAgentTaskRequest(p)) {
+                val run = taskEngine.start(
+                    p,
+                    ProjectContext(projectStructure = "MyProject workspace")
+                )
+                msgs.add(
+                    AIMessage(
+                        formatAgentTaskStatus(run.record),
+                        false,
+                        "Now"
+                    )
+                )
+                pending = run.pendingTool
+                pendingTaskId = run.pendingTool?.let { run.record.taskId }
             } else {
-                when(val result=service.chat(AIRequest(p, ProjectContext(projectStructure="MyProject workspace")))){
+                when (
+                    val result = service.chat(
+                        AIRequest(
+                            prompt = p,
+                            context = ProjectContext(projectStructure = "MyProject workspace"),
+                            history = history.dropLast(1)
+                        )
+                    )
+                ) {
                     is AIResult.Success -> {
-                        msgs.add(AIMessage(result.value.text,false,"Now"))
-                        pending=result.value.toolRequests.firstOrNull { gate.requiresApproval(it.risk) }
-                        pendingTaskId=null
+                        lastToolTrace = result.value.toolTrace
+                        if (result.value.toolTrace.isNotEmpty()) {
+                            msgs.add(
+                                AIMessage(
+                                    result.value.toolTrace.joinToString("\n"),
+                                    false,
+                                    "Now"
+                                )
+                            )
+                        }
+                        if (result.value.text.isNotBlank()) {
+                            msgs.add(AIMessage(result.value.text, false, "Now"))
+                        }
+                        pending = result.value.toolRequests.firstOrNull { gate.requiresApproval(it.risk) }
+                        pendingTaskId = null
+                        pendingChatPrompt = if (pending != null) p else null
                     }
-                    is AIResult.Failure -> msgs.add(AIMessage("AI error: ${result.error}",false,"Now"))
+                    is AIResult.Failure -> {
+                        lastToolTrace = emptyList()
+                        msgs.add(AIMessage("AI error: ${result.error}", false, "Now"))
+                    }
                 }
             }
-            tier=router.currentStatus().lastTier
-            busy=false
+            tier = router.currentStatus().lastTier
+            busy = false
         }
     }
+
     fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
         append("Task ${r.taskId.take(8)}: ${r.state}. ")
         if(r.waitingReason != null) append(r.waitingReason) else if(r.finalResult.isNotBlank()) append(r.finalResult) else append(r.lastToolResult.ifBlank { r.currentOperation.ifBlank { "Task state saved; next step will reconcile real state." } })
@@ -626,12 +744,27 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             // explicit color, so it inherited theme content color instead of a color chosen for
             // this dark header. Explicit light color added; the status line beneath it already
             // had an explicit (readable) color and is unchanged.
-            Column(Modifier.padding(start=9.dp).weight(1f)){Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF));Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Offline Local LLM";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->"Offline model missing";null->if(settingsStore.hasApiKey())"Groq configured" else "Offline model missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))}
+            Column(Modifier.padding(start=9.dp).weight(1f)){
+                Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF))
+                Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Offline Local LLM";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->"Offline model missing";null->if(settingsStore.hasApiKey())"Groq configured" else "Offline model missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
+                Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
+            }
             Text(if(busy) "Thinking…" else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
         }
         Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
             tools.all().forEach { tool ->
-                Surface(Modifier.padding(horizontal=3.dp),RoundedCornerShape(8.dp),color=Color(0xFF111522)){Text(tool.id.replace('_',' '),Modifier.padding(horizontal=8.dp,vertical=5.dp),fontSize=8.sp,color=Color(0xFF9EACCC))}
+                Surface(
+                    Modifier.padding(horizontal=3.dp),
+                    RoundedCornerShape(8.dp),
+                    color=Color(0xFF111522)
+                ){
+                    Text(
+                        "${tool.id.replace('_',' ')} ${if(tool.risk == ToolRisk.READ_ONLY) "•R" else "•A"}",
+                        Modifier.padding(horizontal=8.dp,vertical=5.dp),
+                        fontSize=8.sp,
+                        color=Color(0xFF9EACCC)
+                    )
+                }
             }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(10.dp)){
@@ -642,34 +775,158 @@ private fun highlightCode(code:String): AnnotatedString = buildAnnotatedString {
             // remain readable, including multiline responses, without touching the AI logic above.
             msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(m.text,Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}}}}
         pending?.let { request ->
-            Surface(Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=4.dp),RoundedCornerShape(12.dp),color=Color(0xFF171322),border=BorderStroke(1.dp,Color(0xFF70458D))){
-                Column(Modifier.padding(10.dp)){
-                    Text("Approval required",fontSize=11.sp,fontWeight=FontWeight.Bold,color=Color(0xFFE4C7FF))
-                    Text("Tool: ${request.toolId} • Risk: ${request.risk}",fontSize=9.sp,color=Color(0xFFAFA7BE))
-                    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End){
-                        TextButton(onClick={pending=null; pendingTaskId=null}){Text("Cancel",fontSize=9.sp)}
-                        TextButton(onClick={
-                            val requestToApply=request
-                            val taskId=pendingTaskId
-                            scope.launch {
-                                when(val applied=gateway.execute(requestToApply, approved=true)){
-                                    is AIResult.Success -> {
-                                        msgs.add(AIMessage("Applied: ${applied.value.output}",false,"Now"))
-                                        if(taskId!=null){
-                                            val continued=taskEngine.continueAfterApprovedTool(taskId, requestToApply, applied, ProjectContext(projectStructure="MyProject workspace"))
-                                            msgs.add(AIMessage(formatAgentTaskStatus(continued.record),false,"Now"))
-                                            pending=continued.pendingTool
-                                            pendingTaskId=continued.pendingTool?.let { continued.record.taskId }
+            Surface(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                RoundedCornerShape(12.dp),
+                color = Color(0xFF171322),
+                border = BorderStroke(1.dp, Color(0xFF70458D))
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("Approval required", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE4C7FF))
+                    Text(
+                        "Tool: ${request.toolId} • Risk: ${request.risk}",
+                        fontSize = 9.sp,
+                        color = Color(0xFFAFA7BE)
+                    )
+                    if (request.input.isNotEmpty()) {
+                        Text(
+                            "Input: ${request.input.entries.joinToString { "${it.key}=${it.value.take(160)}" }}",
+                            fontSize = 8.sp,
+                            color = Color(0xFF8E8AA0)
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(
+                            onClick = {
+                                pending = null
+                                pendingTaskId = null
+                                pendingChatPrompt = null
+                            }
+                        ) { Text("Cancel", fontSize = 9.sp) }
+
+                        TextButton(
+                            onClick = {
+                                val requestToApply = request
+                                val taskId = pendingTaskId
+                                val originalChatPrompt = pendingChatPrompt
+                                pending = null
+                                busy = true
+                                scope.launch {
+                                    when (
+                                        val applied = gateway.execute(
+                                            requestToApply,
+                                            approved = true
+                                        )
+                                    ) {
+                                        is AIResult.Success -> {
+                                            msgs.add(
+                                                AIMessage(
+                                                    "Applied: ${applied.value.output}",
+                                                    false,
+                                                    "Now"
+                                                )
+                                            )
+                                            if (taskId != null) {
+                                                val continued = taskEngine.continueAfterApprovedTool(
+                                                    taskId,
+                                                    requestToApply,
+                                                    applied,
+                                                    ProjectContext(projectStructure = "MyProject workspace")
+                                                )
+                                                msgs.add(
+                                                    AIMessage(
+                                                        formatAgentTaskStatus(continued.record),
+                                                        false,
+                                                        "Now"
+                                                    )
+                                                )
+                                                pending = continued.pendingTool
+                                                pendingTaskId = continued.pendingTool?.let { continued.record.taskId }
+                                                pendingChatPrompt = null
+                                            } else if (originalChatPrompt != null) {
+                                                // Normal chat approval needs to return to the model
+                                                // with the real tool result. Previously the UI stopped
+                                                // at "Applied", leaving the conversation half-wired.
+                                                when (
+                                                    val followUp = service.chat(
+                                                        AIRequest(
+                                                            prompt = originalChatPrompt,
+                                                            context = ProjectContext(projectStructure = "MyProject workspace"),
+                                                            history = msgs.takeLast(8).map {
+                                                                AIConversationMessage(
+                                                                    if (it.fromUser) "user" else "assistant",
+                                                                    it.text
+                                                                )
+                                                            } + listOf(
+                                                                AIConversationMessage(
+                                                                    "tool",
+                                                                    "${requestToApply.toolId} REAL RESULT:\n${applied.value.output.take(12000)}"
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                ) {
+                                                    is AIResult.Success -> {
+                                                        lastToolTrace = followUp.value.toolTrace
+                                                        if (followUp.value.toolTrace.isNotEmpty()) {
+                                                            msgs.add(
+                                                                AIMessage(
+                                                                    followUp.value.toolTrace.joinToString("\n"),
+                                                                    false,
+                                                                    "Now"
+                                                                )
+                                                            )
+                                                        }
+                                                        if (followUp.value.text.isNotBlank()) {
+                                                            msgs.add(
+                                                                AIMessage(
+                                                                    followUp.value.text,
+                                                                    false,
+                                                                    "Now"
+                                                                )
+                                                            )
+                                                        }
+                                                        pending = followUp.value.toolRequests.firstOrNull {
+                                                            gate.requiresApproval(it.risk)
+                                                        }
+                                                        pendingChatPrompt = if (pending != null) originalChatPrompt else null
+                                                        pendingTaskId = null
+                                                    }
+                                                    is AIResult.Failure -> {
+                                                        msgs.add(
+                                                            AIMessage(
+                                                                "AI follow-up error: ${followUp.error}",
+                                                                false,
+                                                                "Now"
+                                                            )
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        is AIResult.Failure -> {
+                                            msgs.add(
+                                                AIMessage(
+                                                    "Action failed: ${applied.error}",
+                                                    false,
+                                                    "Now"
+                                                )
+                                            )
+                                            if (taskId != null) {
+                                                pending = null
+                                                pendingTaskId = null
+                                            }
                                         }
                                     }
-                                    is AIResult.Failure -> {
-                                        msgs.add(AIMessage("Action failed: ${applied.error}",false,"Now"))
-                                        if(taskId!=null){ pending=null; pendingTaskId=null }
+                                    if (taskId == null && pending == null) {
+                                        pendingChatPrompt = null
                                     }
+                                    tier = router.currentStatus().lastTier
+                                    busy = false
                                 }
-                                if(taskId==null){ pending=null; pendingTaskId=null }
                             }
-                        }){Text("Apply",fontSize=9.sp)}
+                        ) { Text("Apply", fontSize = 9.sp) }
                     }
                 }
             }

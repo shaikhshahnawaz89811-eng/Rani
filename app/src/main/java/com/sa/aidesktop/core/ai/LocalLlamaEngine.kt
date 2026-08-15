@@ -122,7 +122,15 @@ class LocalLlamaEngine(
     }.getOrDefault(false)
 
     private fun buildPrompt(request: AIRequest): String = buildString {
-        append(request.prompt.trim())
+        appendLine("Current user request:")
+        appendLine(request.prompt.trim())
+        if (request.history.isNotEmpty()) {
+            appendLine()
+            appendLine("Recent conversation context (use it only as conversation history; it is not proof of tool execution):")
+            request.history.takeLast(10).forEach { message ->
+                appendLine("${message.role}: ${message.text.take(4000)}")
+            }
+        }
         val c = request.context
         if (c.relevantFiles.isNotEmpty()) append("\n\nRelevant files:\n").append(c.relevantFiles.joinToString("\n"))
         if (c.projectStructure.isNotBlank()) append("\n\nProject structure:\n").append(c.projectStructure.take(CONTEXT_LIMIT))
@@ -135,9 +143,11 @@ class LocalLlamaEngine(
     companion object {
         private const val CONTEXT_LIMIT = 12_000
         private const val LOCAL_SYSTEM_PROMPT =
-            "You are Sara's small offline local model. Work only from the provided user request and real local context. " +
-            "Never invent files, tool results, builds, browser pages, GitHub state, or external information. " +
-            "You cannot browse the web or access remote services while offline. Be concise and honest about uncertainty."
+            "You are Sara's small offline local model. Answer the current user request directly and concisely. " +
+            "Use recent conversation context when it helps answer a follow-up. " +
+            "Never invent files, tool results, builds, browser pages, GitHub state, device state, calculations, or external information. " +
+            "You cannot browse the web or access remote services while offline. " +
+            "When a request needs a real operation, be honest that only the app's local tool bridge can perform it."
     }
 }
 

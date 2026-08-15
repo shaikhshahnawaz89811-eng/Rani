@@ -43,7 +43,8 @@ class AIWebSendTool(s:AIWebService):AIWebTool(s){
 }
 class AIWebWaitTool(s:AIWebService):AIWebTool(s){
     override val id="ai_web.wait_response"; override val description="Wait for a real AI-web generation to finish and return the observed page state."; override val risk=ToolRisk.READ_ONLY
-    override val parameterHints=mapOf("window_id" to "Browser window id","timeout_ms" to "Wait timeout")
+    override val parameterHints=mapOf("window_id" to "Browser window id","timeout_ms" to "Optional wait timeout in milliseconds")
+    override val requiredParameters = setOf("window_id")
     override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val id=id(input)?:return AIResult.Failure(AIError.InvalidRequest("window_id is required"));return service.waitForResponse(id,input["timeout_ms"]?.toLongOrNull()?:60_000L).let{r->when(r){is BrowserResult.Failure->AIResult.Failure(AIError.Execution(r.message));is BrowserResult.Success->AIResult.Success(ToolResult("STATE=${r.value.state}\nRESPONSE=${r.value.responseText.take(16_000)}"))}}}
 }
 class AIWebReadTool(s:AIWebService):AIWebTool(s){
