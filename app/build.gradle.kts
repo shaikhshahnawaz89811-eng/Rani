@@ -17,8 +17,10 @@ kotlin {
 // (not just the top-level kotlin{} block) makes sure it reaches compileDebugUnitTestKotlin, the
 // task that actually fails. This only widens compiler module visibility — no code is changed.
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    compilerOptions {
-        freeCompilerArgs.add("-Xadd-modules=jdk.httpserver")
+    if (name.contains("Test", ignoreCase = true)) {
+        compilerOptions {
+            freeCompilerArgs.add("-Xadd-modules=jdk.httpserver")
+        }
     }
 }
 
