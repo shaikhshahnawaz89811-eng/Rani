@@ -19,7 +19,42 @@ class SearchFileTool(private val files:FileService):AITool{
 class WriteFileTool(private val files:FileService):AITool{
     override val id="write_file";override val description="Write a controlled workspace file; approval is enforced by ToolExecutionGateway.";override val risk=ToolRisk.WRITE
     override val parameterHints=mapOf("path" to "Workspace-relative path of the file to write","content" to "Full new text content of the file")
-    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{val path=input["path"]?.trim().orEmpty();val content=input["content"]?:return AIResult.Failure(AIError.InvalidRequest("content is required"));if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("path is required"));val r=files.write(path,content);return if(r.isSuccess)AIResult.Success(ToolResult("Updated $path",true))else AIResult.Failure(AIError.Execution("Write failed: ${r.error}"))}
+    override suspend fun execute(input:Map<String,String>):AIResult<ToolResult>{
+        val path=input["path"]?.trim().orEmpty();val content=input["content"]?:return AIResult.Failure(AIError.InvalidRequest("content is required"));if(path.isBlank())return AIResult.Failure(AIError.InvalidRequest("path is required"))
+        // Rule 17 correctness / Rule 13 cleaner-viewer: capture the real previous content BEFORE
+        // writing, so the result can carry a genuine before/after diff instead of only a bare
+        // "Updated <path>" string. A read failure (e.g. this is a brand-new file) just means an
+        // empty "before" — not an error, since write_file is allowed to create new files.
+        val previousContent = files.read(path).let { if (it.isSuccess) it.value.orEmpty() else "" }
+        val r=files.write(path,content)
+        if(!r.isSuccess) return AIResult.Failure(AIError.Execution("Write failed: ${r.error}"))
+        return AIResult.Success(ToolResult(buildWriteSummary(path, previousContent, content), true))
+    }
+}
+
+/** Rule 15 sub-helper (single job: format WriteFileTool's real before/after content into the
+ *  structured, delimiter-marked text the AI chat UI's diff card parses — see SADesktopApp's
+ *  parseFileDiffMessage/FileDiffCard). The first line stays a plain human-readable sentence so any
+ *  other consumer of this text (task status log, tool trace, model context) still reads sensibly
+ *  even without the special-case UI parsing (Rule 4: one chain, not a UI-only side channel). */
+private fun buildWriteSummary(path: String, oldContent: String, newContent: String): String {
+    val diff = ChatDiffUtil.lineDiff(oldContent.lines(), newContent.lines())
+        ?: return "Updated $path (file too large to diff on-device — content replaced)"
+    val changed = diff.count { it.kind != ' ' }
+    if (changed == 0) return "Updated $path (no line changes)"
+    val body = ChatDiffUtil.collapseContext(diff)
+    val sb = StringBuilder()
+    sb.append("Updated $path ($changed line change${if (changed == 1) "" else "s"})\n")
+    sb.append("\u00A7\u00A7FILE_DIFF\u00A7\u00A7path=$path\n")
+    body.forEach { sb.append(it).append('\n') }
+    sb.append("\u00A7\u00A7END_DIFF\u00A7\u00A7\n")
+    // Full new content for the optional "View full code" toggle — capped so a huge file doesn't
+    // blow up the message/tool-trace payload (Rule 20 minimal-necessary-payload); the diff above
+    // is already the useful part when a file is this large.
+    if (newContent.length <= 20_000) {
+        sb.append("\u00A7\u00A7FULL_CONTENT\u00A7\u00A7\n").append(newContent).append("\n\u00A7\u00A7END_FULL\u00A7\u00A7")
+    }
+    return sb.toString()
 }
 
 /** Phase 1 addition: file.list — lists a directory of the controlled workspace via the existing

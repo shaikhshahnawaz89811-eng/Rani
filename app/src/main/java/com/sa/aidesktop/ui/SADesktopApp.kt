@@ -2,10 +2,12 @@ package com.sa.aidesktop.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -24,6 +26,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.input.pointer.pointerInput
@@ -623,6 +626,317 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     }
 }
 
+/** Color + icon for one real [WorkflowStepKind], matching the "MODERN COLOR PALETTE" /
+ *  "ANIMATED THINKING EXAMPLES" reference design. Purely presentational — the step data itself
+ *  (label/detail/elapsed time) always comes from ModelRouter's real, timestamped steps. */
+private fun workflowStepVisual(kind: WorkflowStepKind): Pair<Color, androidx.compose.ui.graphics.vector.ImageVector> = when (kind) {
+    WorkflowStepKind.PLANNING -> Color(0xFF8B5CF6) to Icons.Default.Lightbulb
+    WorkflowStepKind.ANALYZING -> Color(0xFF00BFFF) to Icons.Default.Search
+    WorkflowStepKind.INVESTIGATING -> Color(0xFF06D6A0) to Icons.Default.TravelExplore
+    WorkflowStepKind.EDITING -> Color(0xFFF59E0B) to Icons.Default.Edit
+    WorkflowStepKind.BUILDING -> Color(0xFF00BFFF) to Icons.Default.Build
+    WorkflowStepKind.SUCCESS -> Color(0xFF22C55E) to Icons.Default.CheckCircle
+    WorkflowStepKind.ERROR -> Color(0xFFEF4444) to Icons.Default.Warning
+}
+
+/** Single pulsing dot (scale in/out) — used for Planning ("Pulse" in the reference design) and
+ *  Editing. Real Compose infinite-animation API, not a static icon standing in for motion. */
+@Composable private fun PulseDotIndicator(color: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "pulse")
+    val scale by transition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(550, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "pulseScale"
+    )
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(9.dp).scale(scale).background(color, CircleShape))
+    }
+}
+
+/** Three vertical bars bouncing out of phase — "Wave", used for Analyzing. */
+@Composable private fun WaveBarsIndicator(color: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "wave")
+    val bars = (0 until 3).map { index ->
+        transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                tween(450, delayMillis = index * 120, easing = LinearEasing),
+                RepeatMode.Reverse
+            ),
+            label = "waveBar$index"
+        )
+    }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+        bars.forEach { h -> Box(Modifier.width(2.5.dp).height((11 * h.value).dp).background(color, RoundedCornerShape(1.dp))) }
+    }
+}
+
+/** Three dots fading in sequence — "Scan"/"Running" feel, used for Investigating and Building. */
+@Composable private fun RunningDotsIndicator(color: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "running")
+    val dots = (0 until 3).map { index ->
+        transition.animateFloat(
+            initialValue = 0.25f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                tween(400, delayMillis = index * 130, easing = LinearEasing),
+                RepeatMode.Reverse
+            ),
+            label = "runningDot$index"
+        )
+    }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+        dots.forEach { a -> Box(Modifier.size(4.5.dp).background(color.copy(alpha = a.value), CircleShape)) }
+    }
+}
+
+/** Dispatches the real animation style per real, currently-open WorkflowStepKind (Rule 1
+ *  endpoint: every kind maps to something, nothing falls through to a generic default). Only
+ *  reached for an OPEN step — a finished step already shows its static icon via
+ *  [workflowStepVisual], unchanged. */
+@Composable private fun StepAnimationIndicator(kind: WorkflowStepKind, color: Color, modifier: Modifier = Modifier) {
+    when (kind) {
+        WorkflowStepKind.PLANNING, WorkflowStepKind.EDITING -> PulseDotIndicator(color, modifier)
+        WorkflowStepKind.ANALYZING -> WaveBarsIndicator(color, modifier)
+        WorkflowStepKind.INVESTIGATING, WorkflowStepKind.BUILDING -> RunningDotsIndicator(color, modifier)
+        WorkflowStepKind.SUCCESS, WorkflowStepKind.ERROR -> PulseDotIndicator(color, modifier)
+    }
+}
+
+/** mm:ss for a real elapsed-millis value — never a placeholder, always derived from a real
+ *  start/end timestamp pair captured in ModelRouter. */
+private fun formatElapsed(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val m = totalSeconds / 60
+    val s = totalSeconds % 60
+    return "%02d:%02d".format(m, s)
+}
+
+/** The "Smart Workflow Indicator" / "Thinking Details" panel from the reference design: one row
+ *  per real WorkflowStep the router actually went through this turn, each with its real elapsed
+ *  time. Ticks once a second (via [nowMs]) only while a step is still open, so an in-progress
+ *  step's timer visibly runs instead of staying frozen. */
+@Composable private fun ThinkingDetailsPanel(steps: List<WorkflowStep>, nowMs: Long, onClose: () -> Unit) {
+    if (steps.isEmpty()) return
+    val totalMs = (steps.lastOrNull()?.endedAtMs ?: nowMs) - steps.first().startedAtMs
+    Surface(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        RoundedCornerShape(12.dp),
+        color = Color(0xFF0F172A),
+        border = BorderStroke(1.dp, Color(0xFF1E2938))
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Thinking Details", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE2E8F0))
+                IconButton(onClick = onClose, modifier = Modifier.size(22.dp)) {
+                    Icon(Icons.Default.Close, "Close", tint = Color(0xFF8996B5), modifier = Modifier.size(14.dp))
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            steps.forEach { step ->
+                val (color, icon) = workflowStepVisual(step.kind)
+                val elapsed = (step.endedAtMs ?: nowMs) - step.startedAtMs
+                val open = step.endedAtMs == null
+                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(Modifier.size(22.dp), RoundedCornerShape(11.dp), color = color.copy(alpha = 0.18f)) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            if (open) {
+                                StepAnimationIndicator(step.kind, color, Modifier.size(14.dp))
+                            } else {
+                                Icon(icon, step.label, tint = color, modifier = Modifier.size(13.dp))
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(step.label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = color)
+                        Text(step.detail, fontSize = 9.sp, color = Color(0xFF9AA7C8), maxLines = 1)
+                    }
+                    Text(formatElapsed(elapsed), fontSize = 9.sp, color = Color(0xFF7C86A6))
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Total Time", fontSize = 9.sp, color = Color(0xFF7C86A6))
+                Text(formatElapsed(totalMs), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE2E8F0))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// AI chat card rendering (Rule 15 sub-helpers of AIWindow): a real file-write diff card and a
+// real build-result card, parsed from the exact same message strings the chat already stores —
+// no separate/fake data source. If a message doesn't match either shape it just falls through to
+// the existing plain bubble (see the `msgs.forEach` loop in AIWindow), so no message is ever lost.
+// ---------------------------------------------------------------------------------------------
+
+private data class ParsedFileDiff(
+    val path: String,
+    val summaryLine: String,
+    val diffLines: List<Pair<Char, String>>,
+    val fullContent: String?
+)
+
+/** Parses the §§FILE_DIFF§§...§§END_DIFF§§ (+ optional §§FULL_CONTENT§§) block that
+ *  [com.sa.aidesktop.core.ai.tools.WriteFileTool] now emits (via ChatDiffUtil) into real diff
+ *  lines. Returns null for any message that isn't a write_file result — those keep rendering as
+ *  a normal bubble. */
+private fun parseFileDiffMessage(text: String): ParsedFileDiff? {
+    val diffStart = text.indexOf("\u00A7\u00A7FILE_DIFF\u00A7\u00A7")
+    if (diffStart < 0) return null
+    val diffEnd = text.indexOf("\u00A7\u00A7END_DIFF\u00A7\u00A7", diffStart)
+    if (diffEnd < 0) return null
+    val summaryLine = text.substring(0, diffStart).removePrefix("Applied:").trim()
+    val diffSection = text.substring(diffStart + "\u00A7\u00A7FILE_DIFF\u00A7\u00A7".length, diffEnd)
+    val lines = diffSection.split('\n')
+    val path = lines.firstOrNull()?.removePrefix("path=").orEmpty()
+    val diffLines = lines.drop(1).filter { it.length >= 2 }.map { it[0] to it.substring(2) }
+    val fullStart = text.indexOf("\u00A7\u00A7FULL_CONTENT\u00A7\u00A7")
+    val fullEnd = text.indexOf("\u00A7\u00A7END_FULL\u00A7\u00A7")
+    val fullContent = if (fullStart >= 0 && fullEnd > fullStart) {
+        text.substring(fullStart + "\u00A7\u00A7FULL_CONTENT\u00A7\u00A7".length, fullEnd).trim('\n')
+    } else null
+    return ParsedFileDiff(path, summaryLine, diffLines, fullContent)
+}
+
+private data class ParsedBuildResult(val success: Boolean, val exitInfo: String, val command: String, val output: String)
+
+/** Parses the real "Applied: BUILD/TEST SUCCESS..." / "Action failed: BUILD/TEST FAILED..."
+ *  text that [com.sa.aidesktop.core.coding.BuildProjectTool] already produces — no new/fake
+ *  success or failure signal is invented here, only the existing real text is split apart for a
+ *  styled card. Returns null for any message that isn't a build/test tool result. */
+private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
+    val success = text.startsWith("Applied: BUILD/TEST SUCCESS")
+    val failed = text.startsWith("Action failed: BUILD/TEST FAILED")
+    if (!success && !failed) return null
+    var rest = if (success) text.removePrefix("Applied: BUILD/TEST SUCCESS") else text.removePrefix("Action failed: BUILD/TEST FAILED")
+    rest = rest.trimStart()
+    var exitInfo = ""
+    if (!success) {
+        val exitMatch = Regex("^\\(exit \\d+\\)").find(rest)
+        if (exitMatch != null) { exitInfo = exitMatch.value; rest = rest.removePrefix(exitMatch.value) }
+    }
+    rest = rest.trimStart('\n')
+    val lines = rest.split('\n')
+    val command = lines.firstOrNull().orEmpty()
+    val output = lines.drop(1).joinToString("\n").trim()
+    return ParsedBuildResult(success, exitInfo, command, output)
+}
+
+@Composable private fun FileDiffCard(path: String, summaryLine: String, diffLines: List<Pair<Char, String>>, fullContent: String?) {
+    var expanded by remember(path, fullContent) { mutableStateOf(false) }
+    Surface(
+        Modifier.padding(vertical = 4.dp).widthIn(max = 300.dp),
+        RoundedCornerShape(12.dp),
+        color = Color(0xFF14161F),
+        border = BorderStroke(1.dp, Color(0xFF2A2E45))
+    ) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().background(Color(0xFF1B1E2C)).padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Description, null, Modifier.size(13.dp), tint = Color(0xFF9BCBFF))
+                Spacer(Modifier.width(6.dp))
+                Text(path.substringAfterLast('/').ifBlank { path }, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE7EAF7), modifier = Modifier.weight(1f), maxLines = 1)
+                if (fullContent != null) {
+                    Text(
+                        if (expanded) "Diff view" else "View full code",
+                        fontSize = 9.sp, color = Color(0xFF9C5CFF),
+                        modifier = Modifier.clickable { expanded = !expanded }
+                    )
+                }
+            }
+            Text(summaryLine, fontSize = 9.sp, color = Color(0xFF8996B5), modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp))
+            Column(Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                if (expanded && fullContent != null) {
+                    Text(
+                        highlightCode(fullContent),
+                        fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color(0xFFE7EAF7),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                } else {
+                    diffLines.forEach { (kind, lineText) ->
+                        val bg = when (kind) { '+' -> Color(0x2622C55E); '-' -> Color(0x26EF4444); else -> Color.Transparent }
+                        val fg = when (kind) { '+' -> Color(0xFF86EFAC); '-' -> Color(0xFFFCA5A5); else -> Color(0xFF9AA4C4) }
+                        Row(Modifier.fillMaxWidth().background(bg).padding(horizontal = 10.dp, vertical = 1.dp)) {
+                            Text(kind.toString(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = fg, modifier = Modifier.width(14.dp))
+                            Text(lineText, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = fg, maxLines = 3)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable private fun BuildResultCard(result: ParsedBuildResult, time: String) {
+    var showOutput by remember(result.command, result.output) { mutableStateOf(false) }
+    val accent = if (result.success) Color(0xFF22C55E) else Color(0xFFEF4444)
+    Surface(
+        Modifier.padding(vertical = 4.dp).widthIn(max = 300.dp),
+        RoundedCornerShape(12.dp),
+        color = if (result.success) Color(0xFF102416) else Color(0xFF2A1315),
+        border = BorderStroke(1.dp, accent)
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (result.success) Icons.Default.CheckCircle else Icons.Default.Error, null, Modifier.size(15.dp), tint = accent)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (result.success) "Build successful" else "Build failed ${result.exitInfo}".trim(),
+                    fontSize = 12.sp, fontWeight = FontWeight.Bold, color = accent
+                )
+            }
+            if (result.command.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(result.command, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color(0xFF9AA4C4))
+            }
+            if (result.output.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (showOutput) "Hide output" else "View output",
+                    fontSize = 9.sp, color = Color(0xFF9C5CFF),
+                    modifier = Modifier.clickable { showOutput = !showOutput }
+                )
+                if (showOutput) {
+                    Surface(Modifier.padding(top = 4.dp).fillMaxWidth(), RoundedCornerShape(8.dp), color = Color(0xFF0B0C13)) {
+                        Text(
+                            result.output,
+                            Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()).padding(6.dp),
+                            fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = Color(0xFFC7CEE4)
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(time, fontSize = 8.sp, color = Color(0xFF6F7D9F))
+        }
+    }
+}
+
+/** Curated quick-action chip for the AI window's toolbar (replaces dumping the raw tool list by
+ *  default — Rule 13 cleaner-viewer). Every chip does a real, functional thing: it either fills
+ *  in a real prompt prefix that the same send()/tool pipeline below handles like any other typed
+ *  message, or opens a real info panel — nothing here is a decorative no-op. */
+@Composable private fun QuickActionChip(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Surface(
+        Modifier.padding(horizontal = 3.dp).clickable(onClick = onClick),
+        RoundedCornerShape(8.dp),
+        color = Color(0xFF171A2A)
+    ) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(13.dp), tint = Color(0xFF9BCBFF))
+            Spacer(Modifier.width(5.dp))
+            Text(label, fontSize = 10.sp, color = Color(0xFFDDE3F5))
+        }
+    }
+}
+
 @Composable private fun AIWindow(browser: AndroidBrowserService, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine){
     val context = LocalContext.current
     val files = remember(context) { AndroidProjectFileService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
@@ -716,6 +1030,21 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     // same live activity label can also drive the in-chat status bubble below — one collection,
     // two places that read it (Rule 21: no duplicate/extra state collection).
     val activity by router.activityStatus.collectAsState()
+    // Real, timestamped workflow steps for this turn (Smart Workflow Indicator / Thinking
+    // Details panel) — see ModelRouter.workflowSteps. Additive: `activity`/the typing bubble
+    // above are unchanged, this only adds the tappable detail view.
+    val workflowSteps by router.workflowSteps.collectAsState()
+    var showThinkingDetails by remember { mutableStateOf(false) }
+    // Ticks once a second only while a step is genuinely still open, so in-progress step timers
+    // in ThinkingDetailsPanel visibly run instead of a frozen number.
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(workflowSteps) {
+        while (workflowSteps.isNotEmpty() && workflowSteps.last().endedAtMs == null) {
+            nowMs = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000L)
+        }
+        nowMs = System.currentTimeMillis()
+    }
     val taskEngine = remember(router, gateway, taskStore, tools) {
         TaskEngine(router, gateway, taskStore).also { engine ->
             // Task controls are registered after the engine exists, but the router/gateway hold the
@@ -749,6 +1078,10 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     var pendingChatPrompt by remember { mutableStateOf<String?>(null) }
     var tier by remember { mutableStateOf<RouterTier?>(null) }
     var lastToolTrace by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Real, non-fabricated Groq usage for the most recent turn — see AIResponse.tokenUsage.
+    // Stays null until a live Groq response actually reports a "usage" object; the status row
+    // below the input shows "—" in that case rather than inventing a number.
+    var lastUsage by remember { mutableStateOf<GroqUsage?>(null) }
 
     LaunchedEffect(transcript) { if (transcript.isNotBlank()) input = transcript }
 
@@ -833,6 +1166,7 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
         pendingTaskId = null
         pendingChatPrompt = null
         lastToolTrace = emptyList()
+        lastUsage = null
     }
 
     fun send() {
@@ -877,6 +1211,7 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
                 ) {
                     is AIResult.Success -> {
                         lastToolTrace = result.value.toolTrace
+                        lastUsage = result.value.tokenUsage
                         if (result.value.toolTrace.isNotEmpty()) {
                             msgs.add(
                                 AIMessage(
@@ -908,6 +1243,11 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     }
 
     Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
+        // Header status: real connection state only (Rule 10 — never fake "Online"). Declared at
+        // this scope (not inside the header Row below) because the "Groq AI" quick-action info
+        // panel further down reuses the exact same value — one real status, shown in two places.
+        val statusText = when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}
+        val statusColor = when { statusText.contains("online") -> Color(0xFF22C55E); statusText.contains("configured") -> Color(0xFFF59E0B); else -> Color(0xFFEF4444) }
         Row(Modifier.fillMaxWidth().height(52.dp).background(Color(0xFF10121D)).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
             Surface(Modifier.size(34.dp),RoundedCornerShape(10.dp),color=Color(0xFF4D1A78)){androidx.compose.foundation.Image(painterResource(R.drawable.sara_avatar),contentDescription="Sara",modifier=Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),contentScale=androidx.compose.ui.layout.ContentScale.Crop)}
             // BUG FIX (latest screenshot: Sara's name still hard to see): this Text() had no
@@ -915,28 +1255,62 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
             // this dark header. Explicit light color added; the status line beneath it already
             // had an explicit (readable) color and is unchanged.
             Column(Modifier.padding(start=9.dp).weight(1f)){
-                Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF))
-                Text("${when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}} • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(6.dp).background(statusColor, CircleShape))
+                    Spacer(Modifier.width(5.dp))
+                    Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF))
+                }
+                Text("$statusText • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
                 Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
             }
-            Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFFFC36B) else Color(0xFF79DFA0))
+            Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E))
             IconButton(onClick = { clearChat() }, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Clear chat", tint = Color(0xFF8996B5), modifier = Modifier.size(16.dp))
             }
         }
-        Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
-            tools.all().forEach { tool ->
-                Surface(
-                    Modifier.padding(horizontal=3.dp),
-                    RoundedCornerShape(8.dp),
-                    color=Color(0xFF111522)
-                ){
-                    Text(
-                        "${tool.id.replace('_',' ')} ${if(tool.risk == ToolRisk.READ_ONLY) "•R" else "•A"}",
-                        Modifier.padding(horizontal=8.dp,vertical=5.dp),
-                        fontSize=8.sp,
-                        color=Color(0xFF9EACCC)
-                    )
+        // Curated quick-action toolbar (Rule 13 cleaner-viewer): the full raw tool list (every
+        // registered tool, unchanged, nothing deleted) now lives behind "More" instead of being
+        // dumped by default. Each curated chip does a real thing — the text ones fill a real
+        // prompt prefix into the same input the Send button already uses; "Groq AI" opens a real
+        // provider/tool-count info panel using the same tier/tools state already collected above.
+        var showAllTools by remember { mutableStateOf(false) }
+        var showProviderInfo by remember { mutableStateOf(false) }
+        Row(Modifier.fillMaxWidth().height(40.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
+            QuickActionChip(Icons.Default.Bolt, "Groq AI") { showProviderInfo = true }
+            QuickActionChip(Icons.Default.Public, "Web Search") { input = (if (input.isBlank()) "" else input + "\n") + "Search the web for: " }
+            QuickActionChip(Icons.Default.FolderOpen, "File Search") { input = (if (input.isBlank()) "" else input + "\n") + "Search files for: " }
+            QuickActionChip(Icons.Default.Terminal, "Run Command") { input = (if (input.isBlank()) "" else input + "\n") + "Run: " }
+            QuickActionChip(Icons.Default.Code, "Code") { input = (if (input.isBlank()) "" else input + "\n") + "Write code: " }
+            QuickActionChip(Icons.Default.MoreHoriz, if (showAllTools) "Less" else "More") { showAllTools = !showAllTools }
+        }
+        if (showProviderInfo) {
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), RoundedCornerShape(10.dp), color = Color(0xFF14161F), border = BorderStroke(1.dp, Color(0xFF2A2E45))) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("Provider: $statusText", fontSize = 10.sp, color = Color(0xFFE7EAF7))
+                    Text("Model: ${settingsStore.getModel()}", fontSize = 9.sp, color = Color(0xFF9AA4C4))
+                    Text("Tools registered: ${tools.all().size}", fontSize = 9.sp, color = Color(0xFF9AA4C4))
+                    Text("Agent state: ${taskEngine.current()?.state ?: "IDLE"}", fontSize = 9.sp, color = Color(0xFF9AA4C4))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { showProviderInfo = false }) { Text("Close", fontSize = 9.sp) }
+                    }
+                }
+            }
+        }
+        if (showAllTools) {
+            Row(Modifier.fillMaxWidth().height(44.dp).horizontalScroll(rememberScrollState()).padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
+                tools.all().forEach { tool ->
+                    Surface(
+                        Modifier.padding(horizontal=3.dp),
+                        RoundedCornerShape(8.dp),
+                        color=Color(0xFF111522)
+                    ){
+                        Text(
+                            "${tool.id.replace('_',' ')} ${if(tool.risk == ToolRisk.READ_ONLY) "•R" else "•A"}",
+                            Modifier.padding(horizontal=8.dp,vertical=5.dp),
+                            fontSize=8.sp,
+                            color=Color(0xFF9EACCC)
+                        )
+                    }
                 }
             }
         }
@@ -958,20 +1332,48 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
             // surrounding theme/Surface instead of a color chosen for these specific bubble
             // backgrounds. Explicit light colors are set per bubble (user vs assistant) so both
             // remain readable, including multiline responses, without touching the AI logic above.
-            msgs.forEach{m->Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(renderChatMarkdown(m.text),Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}}}
+            // Rule 13 cleaner-viewer: a real write_file result or a real build/test result renders
+            // as its own card (diff / success-failure) instead of a raw text dump; anything else
+            // (including every plain assistant/user message) keeps the original bubble unchanged.
+            msgs.forEach{m->
+                val buildResult = if (!m.fromUser) parseBuildResultMessage(m.text) else null
+                val fileDiff = if (!m.fromUser && buildResult == null) parseFileDiffMessage(m.text) else null
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){
+                    when {
+                        buildResult != null -> BuildResultCard(buildResult, m.time)
+                        fileDiff != null -> FileDiffCard(fileDiff.path, fileDiff.summaryLine, fileDiff.diffLines, fileDiff.fullContent)
+                        else -> Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(renderChatMarkdown(m.text),Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}
+                    }
+                }
+            }
             // Rule 13: a visible per-type "typing" bubble (not just the small header word) while a
             // turn is in flight — real activityStatus label (Thinking…/Coding…/Browsing…/Git…/
             // Running…) set from the actual tool ids about to run (ModelRouter.activityLabel),
             // never a guessed/generic word.
             if(busy) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Start){
-                Surface(Modifier.padding(vertical=4.dp),RoundedCornerShape(12.dp),color=Color(0xFF171820)){
+                Surface(
+                    Modifier.padding(vertical=4.dp).clickable { showThinkingDetails = !showThinkingDetails },
+                    RoundedCornerShape(12.dp),color=Color(0xFF171820)
+                ){
                     Row(Modifier.padding(horizontal=12.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){
-                        CircularProgressIndicator(Modifier.size(11.dp),color=Color(0xFFFFC36B),strokeWidth=1.5.dp)
+                        // Same real, currently-open workflow step drives this bubble's animation
+                        // as the Thinking Details panel below (Rule 4: one chain, not two
+                        // divergent visuals) — falls back to a plain pulse only before the
+                        // router has pushed its first real step yet.
+                        val openKind = workflowSteps.lastOrNull { it.endedAtMs == null }?.kind
+                        StepAnimationIndicator(openKind ?: WorkflowStepKind.PLANNING, Color(0xFFF59E0B), Modifier.size(13.dp))
                         Spacer(Modifier.width(7.dp))
-                        Text(activity,fontSize=11.sp,color=Color(0xFFFFC36B))
+                        Text(activity,fontSize=11.sp,color=Color(0xFFF59E0B))
+                        if (workflowSteps.isNotEmpty()) {
+                            Spacer(Modifier.width(7.dp))
+                            Text("• Tap to view details",fontSize=9.sp,color=Color(0xFF7C86A6))
+                        }
                     }
                 }
             }
+        }
+        if (showThinkingDetails) {
+            ThinkingDetailsPanel(workflowSteps, nowMs) { showThinkingDetails = false }
         }
         pending?.let { request ->
             Surface(
@@ -1092,6 +1494,7 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
                                                     ) {
                                                         is AIResult.Success -> {
                                                             lastToolTrace = followUp.value.toolTrace
+                                                            lastUsage = followUp.value.tokenUsage
                                                             if (followUp.value.toolTrace.isNotEmpty()) {
                                                                 msgs.add(
                                                                     AIMessage(
@@ -1191,9 +1594,32 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
                     selectionColors=TextSelectionColors(handleColor=Color(0xFF7AFF9B),backgroundColor=Color(0x557AFF9B))
                 )
             )
-            IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF7FC8FF))}
-            IconButton({ if (voiceState.listening) stt.stop() else micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }){Icon(if(voiceState.listening) Icons.Default.Stop else Icons.Default.Mic,"Voice input",tint=if(voiceState.listening) Color(0xFFFF7A9A) else Color(0xFF7FC8FF))}
-            IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFFB55CFF))}
+            IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF00BFFF))}
+            IconButton({ if (voiceState.listening) stt.stop() else micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }){Icon(if(voiceState.listening) Icons.Default.Stop else Icons.Default.Mic,"Voice input",tint=if(voiceState.listening) Color(0xFFEF4444) else Color(0xFF00BFFF))}
+            IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFF8B5CF6))}
+        }
+        // Real model/token status row. Model name always comes from the actual configured
+        // setting (settingsStore.getModel()); token counts come only from lastUsage, which is
+        // set exclusively from a real Groq "usage" object (see AIResponse.tokenUsage) — this
+        // never estimates or invents a number, unlike a fixed "Context: 12K" label would.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val usage = lastUsage
+            val tokensLabel = if (usage == null) {
+                "Tokens: —"
+            } else {
+                val prompt = usage.promptTokens?.toString() ?: "?"
+                val completion = usage.completionTokens?.toString() ?: "?"
+                val total = usage.totalTokens?.toString() ?: "?"
+                "Tokens: $total (prompt $prompt / reply $completion)"
+            }
+            Text(
+                "Model: ${settingsStore.getModel()} • $tokensLabel",
+                fontSize = 9.sp,
+                color = Color(0xFF6F7D9F)
+            )
         }
     }
 }
@@ -1322,7 +1748,7 @@ private data class NanoSession(
                         out.add(if(w.isSuccess) "nano: wrote ${session.displayPath}" else "nano: write failed (${w.error})")
                         nanoState=null
                     }){Text("Y",color=Color(0xFF7AFF9B))}
-                    TextButton(onClick={out.add("nano: exited ${session.displayPath} without saving");nanoState=null}){Text("N",color=Color(0xFFFF6B6B))}
+                    TextButton(onClick={out.add("nano: exited ${session.displayPath} without saving");nanoState=null}){Text("N",color=Color(0xFFEF4444))}
                     TextButton(onClick={nanoState=session.copy(confirmExit=false)}){Text("^C Cancel",color=Color(0xFF7FA8E0))}
                 }
             } else {
@@ -1335,7 +1761,7 @@ private data class NanoSession(
                     TextButton(onClick={
                         if(dirty) nanoState=session.copy(confirmExit=true)
                         else {out.add("nano: exited ${session.displayPath}");nanoState=null}
-                    }){Icon(Icons.Default.Close,null,tint=Color(0xFFFF6B6B));Spacer(Modifier.width(4.dp));Text("^X Exit",fontSize=10.sp,color=Color(0xFFE0E6FF))}
+                    }){Icon(Icons.Default.Close,null,tint=Color(0xFFEF4444));Spacer(Modifier.width(4.dp));Text("^X Exit",fontSize=10.sp,color=Color(0xFFE0E6FF))}
                 }
             }
         }
@@ -1385,7 +1811,7 @@ private data class NanoSession(
             // install, git clone) can genuinely run for a while — the only control besides
             // Enter/Go that this window responds to.
             if (busy) {
-                IconButton(onClick={stopCommand()},modifier=Modifier.size(30.dp)){Icon(Icons.Default.Close,"Stop command",tint=Color(0xFFFF6B6B))}
+                IconButton(onClick={stopCommand()},modifier=Modifier.size(30.dp)){Icon(Icons.Default.Close,"Stop command",tint=Color(0xFFEF4444))}
             }
         }
     }
@@ -1435,10 +1861,10 @@ private data class NanoSession(
             Text(it.path,Modifier.weight(1f),fontSize=11.sp)
             Text((if(it.staged)"STAGED " else "")+it.state,fontSize=9.sp,color=Color(0xFFFFB45B))
         }}
-        if(status?.changes?.isEmpty()==true) Text("Working tree clean",fontSize=10.sp,color=Color(0xFF79DFA0))
+        if(status?.changes?.isEmpty()==true) Text("Working tree clean",fontSize=10.sp,color=Color(0xFF22C55E))
         Spacer(Modifier.height(8.dp))
         Text("GitHub account",fontSize=12.sp,fontWeight=FontWeight.Bold)
-        Text(githubStatus,fontSize=9.sp,color=if(githubStatus=="Not connected")Color(0xFFFFC36B)else Color(0xFF79DFA0))
+        Text(githubStatus,fontSize=9.sp,color=if(githubStatus=="Not connected")Color(0xFFF59E0B)else Color(0xFF22C55E))
         OutlinedTextField(
             value=githubToken,onValueChange={githubToken=it},singleLine=true,
             visualTransformation=PasswordVisualTransformation(),
@@ -1459,7 +1885,7 @@ private data class NanoSession(
             TextButton(onClick={
                 githubAccounts.active()?.let{githubAccounts.remove(it.id)}
                 githubStatus="Not connected";result="GitHub account removed from secure storage."
-            },enabled=!busy&&githubAccounts.active()!=null){Text("Remove",fontSize=9.sp,color=Color(0xFFFF7A9A))}
+            },enabled=!busy&&githubAccounts.active()!=null){Text("Remove",fontSize=9.sp,color=Color(0xFFEF4444))}
         }
         Text("Use a GitHub token created on GitHub. Sara never receives the token value and it is stored through Android Keystore-backed SecureStore.",fontSize=8.sp,color=Color(0xFF7C86A6))
         Spacer(Modifier.height(8.dp))
@@ -1557,7 +1983,7 @@ private data class NanoSession(
                 val r=files.delete(selected!!.path)
                 opError = r.error?.let{ "Delete failed: ${describeFileError(it)}" }
                 refresh()
-            }){Text("Delete",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+            }){Text("Delete",fontSize=10.sp,color=Color(0xFFEF4444))}
         }
         if(selected!=null && renaming) Row(Modifier.fillMaxWidth().padding(vertical=3.dp),verticalAlignment=Alignment.CenterVertically){
             TextField(renameText,{renameText=it},Modifier.weight(1f),singleLine=true,colors=TextFieldDefaults.colors(focusedContainerColor=Color(0xFF11131C),unfocusedContainerColor=Color(0xFF11131C),focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent))
@@ -1568,7 +1994,7 @@ private data class NanoSession(
             },enabled=renameText.isNotBlank()){Text("Save",fontSize=10.sp)}
             TextButton(onClick={renaming=false;opError=null}){Text("Cancel",fontSize=10.sp)}
         }
-        if(opError!=null) Text(opError!!,fontSize=9.sp,color=Color(0xFFFF7A9A),modifier=Modifier.padding(bottom=3.dp))
+        if(opError!=null) Text(opError!!,fontSize=9.sp,color=Color(0xFFEF4444),modifier=Modifier.padding(bottom=3.dp))
         Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
             shown.forEach { f ->
                 Surface(Modifier.padding(6.dp).size(92.dp,86.dp).clickable{
@@ -1626,7 +2052,7 @@ private data class NanoSession(
         // Phase 1: real Groq provider configuration. The key is stored only through SecureStore
         // (AndroidKeyStore-backed AES/GCM) and is never shown back in full once saved.
         Text("AI Provider — Groq (online)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — Sara cannot chat until this is set",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF79DFA0) else Color(0xFFFFC36B),modifier=Modifier.padding(top=6.dp))
+        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — Sara cannot chat until this is set",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF22C55E) else Color(0xFFF59E0B),modifier=Modifier.padding(top=6.dp))
         OutlinedTextField(
             value=apiKeyInput,onValueChange={apiKeyInput=it},
             label={Text("Groq API key",fontSize=10.sp)},
@@ -1635,7 +2061,7 @@ private data class NanoSession(
         )
         Row(Modifier.padding(top=6.dp)){
             TextButton(onClick={ if(apiKeyInput.isNotBlank()){ store.setApiKey(apiKeyInput); apiKeyInput=""; apiKeyConfigured=true; savedNotice="Saved." } }){Text("Save key",fontSize=10.sp)}
-            TextButton(onClick={ store.clearApiKey(); apiKeyConfigured=false; savedNotice="API key removed." }){Text("Remove key",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+            TextButton(onClick={ store.clearApiKey(); apiKeyConfigured=false; savedNotice="API key removed." }){Text("Remove key",fontSize=10.sp,color=Color(0xFFEF4444))}
         }
         OutlinedTextField(value=model,onValueChange={model=it},label={Text("Groq model",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=10.dp))
         Row(Modifier.fillMaxWidth().padding(top=8.dp)){
@@ -1651,13 +2077,13 @@ private data class NanoSession(
             model=store.getModel();timeoutSeconds=(store.getTimeoutMs()/1000).toString();retryLimit=store.getRetryLimit().toString();maxTokens=store.getMaxOutputTokens()?.toString()?:""
             savedNotice="Settings saved."
         },modifier=Modifier.padding(top=6.dp)){Text("Save provider settings",fontSize=10.sp)}
-        savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF79DFA0),modifier=Modifier.padding(top=4.dp)) }
+        savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF22C55E),modifier=Modifier.padding(top=4.dp)) }
         Text("Values are clamped to safe ranges automatically. Sara runs entirely on Groq — chat, tools and coding tasks all require this key.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
         Divider(Modifier.padding(top=14.dp))
 
         Text("AI Provider — Offline Local LLM",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
         Text("This build does not bundle an on-device inference runtime yet, so a configured GGUF model is validated but cannot run locally. Sara now uses Groq only for chat — this section is for managing a stored model file, nothing here is used automatically.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
-        Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFFFC36B) else Color(0xFF79DFA0),modifier=Modifier.padding(top=6.dp))
+        Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFF59E0B) else Color(0xFF22C55E),modifier=Modifier.padding(top=6.dp))
         Row(Modifier.padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
             TextButton(onClick={ if(!localBusy) modelPicker.launch(arrayOf("application/octet-stream","application/*","*/*")) },enabled=!localBusy){Text(if(localBusy) "Importing…" else "Select GGUF model",fontSize=10.sp)}
             TextButton(onClick={ localScope.launch { offlineAi.unload(); localStatus="Offline model state reset." } }){Text("Unload",fontSize=10.sp)}
@@ -1672,7 +2098,7 @@ private data class NanoSession(
                         localStatus = "Local model could not be removed."
                     }
                 }
-            }){Text("Remove",fontSize=10.sp,color=Color(0xFFFF7A9A))}
+            }){Text("Remove",fontSize=10.sp,color=Color(0xFFEF4444))}
         }
         OutlinedTextField(value=localContext,onValueChange={localContext=it.filter(Char::isDigit)},label={Text("Context size",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=4.dp))
         Row(Modifier.fillMaxWidth().padding(top=6.dp)){

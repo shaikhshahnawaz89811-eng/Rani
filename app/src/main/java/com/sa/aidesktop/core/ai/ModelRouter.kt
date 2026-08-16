@@ -22,6 +22,27 @@ data class RouterStatus(
     val consecutiveOnlineFailures: Int
 )
 
+/**
+ * The "Smart Workflow Indicator" steps shown in the chat's Thinking Details panel. Each kind maps
+ * to a real, already-happening phase of [ModelRouter.chat] — nothing here is decorative; a step
+ * only appears because the router actually entered that phase for this request.
+ */
+enum class WorkflowStepKind { PLANNING, ANALYZING, INVESTIGATING, EDITING, BUILDING, SUCCESS, ERROR }
+
+/**
+ * One real step in the current turn's workflow. [startedAtMs]/[endedAtMs] are real
+ * System.currentTimeMillis() timestamps captured when the router actually entered/left that
+ * phase — the UI derives elapsed time from these, it never receives a pre-computed or invented
+ * duration.
+ */
+data class WorkflowStep(
+    val kind: WorkflowStepKind,
+    val label: String,
+    val detail: String,
+    val startedAtMs: Long,
+    val endedAtMs: Long? = null
+)
+
 private const val MAX_TOOL_ROUNDS = 6
 private const val TOOL_OUTPUT_CHAR_LIMIT = 8_000
 
@@ -55,12 +76,65 @@ class ModelRouter(
     private val _activityStatus = MutableStateFlow("Thinking…")
     val activityStatus: StateFlow<String> = _activityStatus.asStateFlow()
 
+    // Structured, real per-turn workflow (Planning/Analyzing/Investigating/Editing/Building/
+    // Completed-or-Error) shown in the chat's "Thinking Details" panel. Additive to
+    // activityStatus above — nothing that already reads activityStatus changes behavior.
+    private val _workflowSteps = MutableStateFlow<List<WorkflowStep>>(emptyList())
+    val workflowSteps: StateFlow<List<WorkflowStep>> = _workflowSteps.asStateFlow()
+
     fun currentStatus(): RouterStatus = status
 
+    private fun resetWorkflow() { _workflowSteps.value = emptyList() }
+
+    /** Opens (or refreshes) the real current step. If the router is still in the same phase as
+     *  the previous step, that step's detail is refreshed in place rather than starting a
+     *  duplicate — its real startedAtMs (and therefore its elapsed time) is preserved. */
+    private fun pushStep(kind: WorkflowStepKind, label: String, detail: String) {
+        val now = System.currentTimeMillis()
+        val current = _workflowSteps.value
+        val last = current.lastOrNull()
+        _workflowSteps.value = when {
+            last != null && last.kind == kind && last.endedAtMs == null ->
+                current.dropLast(1) + last.copy(detail = detail)
+            last != null && last.endedAtMs == null ->
+                current.dropLast(1) + last.copy(endedAtMs = now) + WorkflowStep(kind, label, detail, now)
+            else -> current + WorkflowStep(kind, label, detail, now)
+        }
+    }
+
+    /** Closes the whole turn with a terminal SUCCESS/ERROR step, ending whatever step was open
+     *  with a real timestamp so its shown duration is real elapsed time, never invented. */
+    private fun finishWorkflow(kind: WorkflowStepKind, label: String, detail: String) {
+        pushStep(kind, label, detail)
+        val now = System.currentTimeMillis()
+        val current = _workflowSteps.value
+        val last = current.lastOrNull() ?: return
+        _workflowSteps.value = current.dropLast(1) + last.copy(endedAtMs = now)
+    }
+
+    /** Categorizes a round's real, about-to-run tool ids into one of the read-only workflow
+     *  phases. Only reached for tools already filtered to ToolRisk.READ_ONLY by the caller, so
+     *  EDITING here only means "read-only inspection ahead of a possible future edit", not that a
+     *  write happened — actual writes are reported through the EDITING step pushed at the
+     *  approval-request site below. */
+    private fun describeReadOnlyRound(toolIds: List<String>): Triple<WorkflowStepKind, String, String> = when {
+        toolIds.any { it == "run_terminal" || it == "project.build" } ->
+            Triple(WorkflowStepKind.BUILDING, "Building", "Running ${toolIds.first { it == "run_terminal" || it == "project.build" }}")
+        toolIds.any { it.startsWith("browser.") || it.startsWith("ai_web.") } ->
+            Triple(WorkflowStepKind.INVESTIGATING, "Investigating", "Checking the browser (${toolIds.joinToString()})")
+        toolIds.any { it.startsWith("git.") || it.startsWith("github.") } ->
+            Triple(WorkflowStepKind.INVESTIGATING, "Investigating", "Checking Git/GitHub state (${toolIds.joinToString()})")
+        toolIds.any { it in setOf("read_file", "search_files", "list_files") || it.startsWith("project.") } ->
+            Triple(WorkflowStepKind.INVESTIGATING, "Investigating", "Reading the project (${toolIds.joinToString()})")
+        else -> Triple(WorkflowStepKind.ANALYZING, "Analyzing", "Checking ${toolIds.joinToString()}")
+    }
+
     override suspend fun chat(request: AIRequest): AIResult<AIResponse> {
+        resetWorkflow()
         if (request.prompt.isBlank()) {
             return AIResult.Failure(AIError.InvalidRequest("Message cannot be empty."))
         }
+        pushStep(WorkflowStepKind.PLANNING, "Planning", "Understanding your request")
 
         if (!hasApiKey()) {
             status = status.copy(
@@ -74,9 +148,17 @@ class ModelRouter(
             // silently handed to the offline/local model.
             val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
             if (localIntent != null) {
-                return executeLocalIntent(localIntent, request)
+                pushStep(WorkflowStepKind.INVESTIGATING, "Investigating", "Matching a local command (no Groq key)")
+                val result = executeLocalIntent(localIntent, request)
+                if (result is AIResult.Success) {
+                    finishWorkflow(WorkflowStepKind.SUCCESS, "Completed", "Local command finished")
+                } else {
+                    finishWorkflow(WorkflowStepKind.ERROR, "Error", "Local command failed")
+                }
+                return result
             }
 
+            finishWorkflow(WorkflowStepKind.ERROR, "Error", "No Groq API key configured")
             return AIResult.Failure(
                 AIError.ModelUnavailable("Groq API key is not configured. Add your Groq API key in Settings to use Sara.")
             )
@@ -104,6 +186,7 @@ class ModelRouter(
 
         repeat(MAX_TOOL_ROUNDS) {
             _activityStatus.value = "Thinking…"
+            pushStep(WorkflowStepKind.ANALYZING, "Analyzing", "Reading the response, deciding next action")
             when (
                 val result = engine.chatConversation(
                     messages = messages.toList(),
@@ -124,8 +207,10 @@ class ModelRouter(
                     // unrelated "no local GGUF model configured" message.
                     val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
                     if (localIntent != null) {
+                        pushStep(WorkflowStepKind.INVESTIGATING, "Investigating", "Groq failed; matching a local command")
                         val fallback = executeLocalIntent(localIntent, request)
                         return if (fallback is AIResult.Success) {
+                            finishWorkflow(WorkflowStepKind.SUCCESS, "Completed", "Handled locally after a Groq error")
                             AIResult.Success(
                                 fallback.value.copy(
                                     toolTrace = listOf("GROQ ERROR: $realError (handled locally by tool match)") +
@@ -133,9 +218,11 @@ class ModelRouter(
                                 )
                             )
                         } else {
+                            finishWorkflow(WorkflowStepKind.ERROR, "Error", realError)
                             fallback
                         }
                     }
+                    finishWorkflow(WorkflowStepKind.ERROR, "Error", realError)
                     return AIResult.Failure(AIError.ModelUnavailable("Groq request failed: $realError"))
                 }
 
@@ -191,11 +278,17 @@ class ModelRouter(
                             else "Approval required for ${writeRequests.size} actions."
                         }
                         writeRequests.forEach { trace += "APPROVAL REQUIRED: ${it.toolId} (${it.risk})" }
+                        pushStep(
+                            WorkflowStepKind.EDITING,
+                            "Editing",
+                            "Waiting for approval: ${writeRequests.joinToString { it.toolId }}"
+                        )
                         return AIResult.Success(
                             AIResponse(
                                 text = text,
                                 toolRequests = writeRequests,
-                                toolTrace = trace.toList()
+                                toolTrace = trace.toList(),
+                                tokenUsage = response.usage
                             )
                         )
                     }
@@ -209,13 +302,21 @@ class ModelRouter(
                             lastError = null,
                             consecutiveOnlineFailures = 0
                         )
+                        finishWorkflow(WorkflowStepKind.SUCCESS, "Completed", "Response ready")
                         return AIResult.Success(
                             AIResponse(
                                 text = response.text,
-                                toolTrace = trace.toList()
+                                toolTrace = trace.toList(),
+                                tokenUsage = response.usage
                             )
                         )
                     }
+
+                    // All remaining requests are read-only (write requests already returned above
+                    // for approval) — categorize the real about-to-run tool ids into the matching
+                    // workflow phase before executing them.
+                    val (roundKind, roundLabel, roundDetail) = describeReadOnlyRound(knownRequests.map { it.toolId })
+                    pushStep(roundKind, roundLabel, roundDetail)
 
                     // Execute every read-only tool through the real gateway and feed its actual
                     // result back using the provider's real tool-message protocol.
@@ -262,6 +363,7 @@ class ModelRouter(
             lastError = "Tool reasoning limit reached.",
             consecutiveOnlineFailures = 0
         )
+        finishWorkflow(WorkflowStepKind.ERROR, "Error", "Stopped after $MAX_TOOL_ROUNDS tool rounds")
         return AIResult.Success(
             AIResponse(
                 text = "I stopped the tool loop after $MAX_TOOL_ROUNDS rounds. No unverified action was claimed.",

@@ -12,7 +12,12 @@ data class AIRequest(
 data class AIResponse(
     val text:String,
     val toolRequests:List<ToolRequest> = emptyList(),
-    val toolTrace:List<String> = emptyList()
+    val toolTrace:List<String> = emptyList(),
+    /** Real token usage as reported by Groq for the turn that produced this response — null
+     *  whenever the response did not come from a live Groq call (e.g. a purely local-intent
+     *  match, or Groq's response omitted its "usage" object). Never estimated locally: a UI
+     *  that shows this must show "unknown" rather than guess a number. */
+    val tokenUsage:GroqUsage? = null
 )
 sealed interface AIError { data class InvalidRequest(val message:String):AIError; data class ModelUnavailable(val message:String):AIError; data class ToolDenied(val message:String):AIError; data class Execution(val message:String):AIError }
 
