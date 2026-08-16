@@ -265,7 +265,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
                     when(w.type){
                         WindowType.DEVELOPER->DeveloperWindow(files)
                         WindowType.AI->AIWindow(browser, settingsStore, offlineAi)
-                        WindowType.TERMINAL->TerminalWindow(terminal, liveOutput)
+                        WindowType.TERMINAL->TerminalWindow(terminal, liveOutput, files)
                         WindowType.GIT->GitWindow(files, githubAccounts, githubApi)
                         WindowType.FILES->FilesWindow(files)
                         WindowType.SETTINGS->SettingsWindow(settingsStore, offlineAi)
@@ -1173,19 +1173,22 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
             // inputs grow instead). minLines/maxLines lets it grow up to 6 lines as you type and
             // shrink back down; Enter still inserts a newline (send stays on the explicit Send
             // button below, unchanged) so nothing about submit behavior changes.
+            // Terminal-style prompt marker (matches TerminalWindow's "$"), so the chat input reads
+            // like a shell prompt even though it still sends a normal chat message underneath.
+            Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B),modifier=Modifier.padding(end=4.dp))
             TextField(
                 input,{input=it},Modifier.weight(1f),
-                textStyle=LocalTextStyle.current.copy(color=Color(0xFFF2F4FF),fontSize=12.sp),
-                placeholder={Text("Ask Sara about your project...",fontSize=11.sp,color=Color(0xFF8993B8))},
+                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,color=Color(0xFFE0E6FF),fontSize=12.sp),
+                placeholder={Text("Ask Sara about your project...",fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFF8993B8))},
                 minLines=1,maxLines=6,enabled=!busy,
                 colors=TextFieldDefaults.colors(
-                    focusedContainerColor=Color(0xFF11121A),unfocusedContainerColor=Color(0xFF11121A),
-                    disabledContainerColor=Color(0xFF11121A),
+                    focusedContainerColor=Color(0xFF050609),unfocusedContainerColor=Color(0xFF050609),
+                    disabledContainerColor=Color(0xFF050609),
                     focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
-                    focusedTextColor=Color(0xFFF2F4FF),unfocusedTextColor=Color(0xFFF2F4FF),disabledTextColor=Color(0xFF7A8199),
-                    cursorColor=Color(0xFFB55CFF),
+                    focusedTextColor=Color(0xFFE0E6FF),unfocusedTextColor=Color(0xFFE0E6FF),disabledTextColor=Color(0xFF7A8199),
+                    cursorColor=Color(0xFF7AFF9B),
                     focusedPlaceholderColor=Color(0xFF8993B8),unfocusedPlaceholderColor=Color(0xFF8993B8),
-                    selectionColors=TextSelectionColors(handleColor=Color(0xFFB55CFF),backgroundColor=Color(0x55B55CFF))
+                    selectionColors=TextSelectionColors(handleColor=Color(0xFF7AFF9B),backgroundColor=Color(0x557AFF9B))
                 )
             )
             IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF7FC8FF))}
@@ -1195,10 +1198,33 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     }
 }
 
-@Composable private fun TerminalWindow(terminal: TerminalService, liveOutput: kotlinx.coroutines.flow.StateFlow<String>){
+/** Termux-style `nano <file>` state. `nano` is a full-screen interactive editor, not a one-shot
+ *  TerminalResult, so it is intercepted here at the UI layer before terminal.execute() — exactly
+ *  like a real terminal emulator special-cases a curses app — and reuses the existing sandboxed
+ *  FileService read/write (Rule 8: same real file-access path as the rest of the app, nothing
+ *  duplicated). filePath is workspace-relative (what FileService expects); displayPath is what
+ *  the user actually typed, shown back to them like real nano's title bar. */
+private data class NanoSession(
+    val displayPath: String,
+    val filePath: String,
+    val original: String,
+    val content: String,
+    val confirmExit: Boolean = false
+)
+
+@Composable private fun TerminalWindow(terminal: TerminalService, liveOutput: kotlinx.coroutines.flow.StateFlow<String>, files: FileService){
     var input by remember{mutableStateOf("")}
     val initial=terminal.state()
-    val out=remember{mutableStateListOf("SA Embedded Terminal","Workspace: ${initial.workingDirectory}","Type help for supported commands.","user@sa-desktop:~/MyProject$")}
+    // Termux-style prompt: real terminals show the actual current directory, not a fixed string.
+    // rootPath is the workspace root captured once (before any `cd`), so every later prompt can
+    // be rendered relative to it the same way Termux shows "~" for home.
+    val rootPath = remember { initial.workingDirectory }
+    fun displayCwd(absolute: String): String {
+        val suffix = absolute.removePrefix(rootPath)
+        return if (suffix.isBlank()) "~" else "~" + suffix.replace(java.io.File.separatorChar, '/')
+    }
+    var cwdDisplay by remember { mutableStateOf(displayCwd(initial.workingDirectory)) }
+    val out=remember{mutableStateListOf("SA Embedded Terminal — Workspace: ${initial.workingDirectory}","Type help for supported commands.")}
     // BUG FIX (Rule 14 weakness-check on RealLinuxShellBackend just added): this used to call
     // terminal.execute() directly on the composable's own (UI) thread. That was already
     // questionable for the old restricted sandbox, but `bootstrap install` (real network
@@ -1213,48 +1239,135 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     // `bootstrap install` download %, or each line of a long real command — instead of the
     // terminal showing nothing until the whole thing finishes.
     val live by liveOutput.collectAsState()
+    var nanoState by remember { mutableStateOf<NanoSession?>(null) }
+
+    /** Resolves a `nano` argument (relative to the terminal's CURRENT directory, which may be
+     *  deep in a `cd`-ed subfolder) into a workspace-relative FileService path — same
+     *  root-containment rule EmbeddedShellBackend/AndroidProjectFileService already enforce, so
+     *  nano can never read/write outside the sandboxed workspace. Returns null when the target
+     *  would escape the workspace. */
+    fun resolveWorkspaceRelativePath(arg: String): String? {
+        val current = terminal.state().workingDirectory
+        val candidate = runCatching {
+            java.io.File(if (arg.startsWith("/")) arg else "$current/$arg").canonicalFile
+        }.getOrNull() ?: return null
+        val root = java.io.File(rootPath).canonicalFile
+        val inside = candidate.path == root.path || candidate.path.startsWith(root.path + java.io.File.separator)
+        if (!inside) return null
+        return root.toPath().relativize(candidate.toPath()).toString().replace(java.io.File.separatorChar, '/')
+    }
+
+    fun openNano(arg: String) {
+        val relPath = resolveWorkspaceRelativePath(arg)
+        if (relPath == null) { out.add("nano: $arg: Permission denied (outside workspace)"); return }
+        val read = files.read(relPath)
+        val loaded = when {
+            read.isSuccess -> read.value.orEmpty()
+            read.error == FileError.NotFound -> "" // real nano opens a new empty buffer for a new filename
+            read.error == FileError.IsDirectory -> { out.add("nano: $arg: Is a directory"); return }
+            else -> { out.add("nano: $arg: cannot open (${read.error})"); return }
+        }
+        nanoState = NanoSession(displayPath = arg, filePath = relPath, original = loaded, content = loaded)
+    }
+
     fun runCommand(){
         if (busy || input.isBlank()) return
-        val submitted = input; input=""; busy = true
-        out.add("user@sa-desktop:~/MyProject$ $submitted")
+        val submitted = input; input=""
+        out.add("$cwdDisplay $ $submitted")
+        if (submitted == "nano" || submitted.startsWith("nano ")) {
+            val arg = submitted.removePrefix("nano").trim()
+            if (arg.isBlank()) out.add("nano: missing filename. Usage: nano <file>") else openNano(arg)
+            return
+        }
+        busy = true
         scope.launch {
             val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { terminal.execute(submitted) }
-            if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}") }
-            out.add("user@sa-desktop:~/MyProject$")
+            if(r.output=="__CLEAR__") out.clear() else if(r.output.isNotEmpty()) out.add(r.output)
+            // Real terminals don't print "exit code: 0" after every successful command — only
+            // surface it when something actually failed, so this stays honest without adding
+            // clutter Termux itself never shows.
+            if (r.exitCode != 0 && !r.cancelled) out.add("exit code: ${r.exitCode}")
+            cwdDisplay = displayCwd(terminal.state().workingDirectory)
             busy = false
         }
     }
     fun stopCommand(){ if (busy) scope.launch { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { terminal.cancel() } } }
+
+    if (nanoState != null) {
+        val session = nanoState!!
+        val dirty = session.content != session.original
+        Column(Modifier.fillMaxSize().background(Color(0xFF050609))){
+            Row(Modifier.fillMaxWidth().background(Color(0xFF1B2A4A)).padding(vertical=4.dp,horizontal=8.dp)){
+                Text("GNU nano",fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))
+                Spacer(Modifier.weight(1f))
+                Text(session.displayPath + if(dirty) " (modified)" else "",fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))
+            }
+            TextField(
+                value=session.content,onValueChange={nanoState=session.copy(content=it)},
+                modifier=Modifier.weight(1f).fillMaxWidth(),
+                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF)),
+                colors=TextFieldDefaults.colors(
+                    focusedContainerColor=Color(0xFF050609),unfocusedContainerColor=Color(0xFF050609),
+                    focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
+                    focusedTextColor=Color(0xFFE0E6FF),unfocusedTextColor=Color(0xFFE0E6FF),
+                    cursorColor=Color(0xFF7AFF9B)
+                )
+            )
+            if (session.confirmExit) {
+                // Real nano's "Save modified buffer? Y/N/^C" prompt on exit with unsaved changes.
+                Row(Modifier.fillMaxWidth().background(Color(0xFF1B2A4A)).padding(6.dp),verticalAlignment=Alignment.CenterVertically){
+                    Text("Save modified buffer? ",fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))
+                    TextButton(onClick={
+                        val w=files.write(session.filePath,session.content)
+                        out.add(if(w.isSuccess) "nano: wrote ${session.displayPath}" else "nano: write failed (${w.error})")
+                        nanoState=null
+                    }){Text("Y",color=Color(0xFF7AFF9B))}
+                    TextButton(onClick={out.add("nano: exited ${session.displayPath} without saving");nanoState=null}){Text("N",color=Color(0xFFFF6B6B))}
+                    TextButton(onClick={nanoState=session.copy(confirmExit=false)}){Text("^C Cancel",color=Color(0xFF7FA8E0))}
+                }
+            } else {
+                Row(Modifier.fillMaxWidth().background(Color(0xFF11121A)).padding(6.dp),horizontalArrangement=Arrangement.SpaceEvenly){
+                    TextButton(onClick={
+                        val w=files.write(session.filePath,session.content)
+                        out.add(if(w.isSuccess) "nano: wrote ${session.displayPath}" else "nano: write failed (${w.error})")
+                        if(w.isSuccess) nanoState=session.copy(original=session.content)
+                    }){Icon(Icons.Default.Save,null,tint=Color(0xFF7AFF9B));Spacer(Modifier.width(4.dp));Text("^O Write Out",fontSize=10.sp,color=Color(0xFFE0E6FF))}
+                    TextButton(onClick={
+                        if(dirty) nanoState=session.copy(confirmExit=true)
+                        else {out.add("nano: exited ${session.displayPath}");nanoState=null}
+                    }){Icon(Icons.Default.Close,null,tint=Color(0xFFFF6B6B));Spacer(Modifier.width(4.dp));Text("^X Exit",fontSize=10.sp,color=Color(0xFFE0E6FF))}
+                }
+            }
+        }
+        return
+    }
+
     // BUG FIX (screenshot: taps around the terminal seemingly "sending" input): audited every
-    // pointer handler in this window. The scrollable output Column below has no clickable/
-    // pointerInput of its own (only its own verticalScroll gesture), the input TextField has no
-    // click listener attached (only onValueChange for typing), and runCommand() above is now the
-    // single place that calls terminal.execute - wired to exactly one control, the send IconButton
-    // below. Nothing in this composable can submit a command except that one explicit tap. The
-    // resize-handle overlap that could previously intercept taps near the bottom edge of a short/
-    // "mini" window is fixed separately in DesktopWindowView (content is now inset from the
-    // resize-only strip), which is what could make taps near "$" behave unpredictably after
-    // rotation shrank the window.
+    // pointer handler in this window. The scrollable Column below has no clickable/pointerInput
+    // of its own (only its own verticalScroll gesture), the input TextField has no click
+    // listener attached (only onValueChange for typing), and runCommand() above is now the
+    // single place that calls terminal.execute — wired to exactly the Enter/Go key and, while
+    // busy, the Stop icon. Nothing in this composable can submit a command any other way.
     val termScroll = rememberScrollState()
     // BUG FIX (Rule 1/17: terminal output looked "cut off" after a command): same class of bug
     // as the AI chat window above — new output lines never drove the scroll position, so a
     // command's real result could land below the visible area. Auto-scroll to the latest line
-    // whenever output grows; this only moves scroll, it never touches command execution.
-    LaunchedEffect(out.size) {
-        if (termScroll.maxValue > 0) termScroll.animateScrollTo(termScroll.maxValue)
+    // (which is always the live prompt row now, Termux-style) whenever output grows or a run
+    // starts/finishes; this only moves scroll, it never touches command execution.
+    LaunchedEffect(out.size, busy) {
+        termScroll.animateScrollTo(termScroll.maxValue)
     }
-    Column(Modifier.fillMaxSize().background(Color(0xFF050609))){
-        Column(Modifier.weight(1f).verticalScroll(termScroll).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
+    Column(Modifier.fillMaxSize().background(Color(0xFF050609)).verticalScroll(termScroll).padding(10.dp)){
+        out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}
         if (busy && live.isNotBlank()) {
-            Text(live,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFF7FA8E0),modifier=Modifier.padding(horizontal=10.dp))
+            Text(live,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFF7FA8E0))
         }
-        Row(Modifier.padding(8.dp),verticalAlignment=Alignment.CenterVertically){
-            Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B))
-            // BUG FIX (screenshot: terminal typed input invisible next to "$"): the transparent
-            // TextField had a textStyle with no explicit color, so typed characters inherited
-            // whatever content color the surrounding theme provided instead of a readable
-            // terminal-style color. Text/cursor/selection colors are now explicit while keeping
-            // the transparent background, monospace font, and existing command-execution logic.
+        // Termux-style live prompt: part of the SAME continuous scroll as the output above (not
+        // a separate fixed row), always the last line, no explicit "Run" button — Enter/Go on
+        // the keyboard submits, exactly like a real terminal.
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Text("$cwdDisplay $",fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFF7AFF9B))
+            Spacer(Modifier.width(4.dp))
             TextField(
                 input,{input=it},Modifier.weight(1f),singleLine=true,enabled=!busy,
                 colors=TextFieldDefaults.colors(
@@ -1264,15 +1377,16 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
                     cursorColor=Color(0xFF7AFF9B),
                     selectionColors=TextSelectionColors(handleColor=Color(0xFF7AFF9B),backgroundColor=Color(0x557AFF9B))
                 ),
-                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF))
+                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF)),
+                keyboardOptions=androidx.compose.foundation.text.KeyboardOptions(imeAction=androidx.compose.ui.text.input.ImeAction.Go),
+                keyboardActions=androidx.compose.foundation.text.KeyboardActions(onGo={runCommand()})
             )
-            // Stop button (new): needed now that real commands (bootstrap install, apt install,
-            // git clone) can genuinely run for a while — previously there was no way to interrupt
-            // a running command from this window at all, only an internal 10s auto-timeout.
+            // Stop button (unchanged): needed now that real commands (bootstrap install, apt
+            // install, git clone) can genuinely run for a while — the only control besides
+            // Enter/Go that this window responds to.
             if (busy) {
-                IconButton(onClick={stopCommand()},modifier=Modifier.size(34.dp)){Icon(Icons.Default.Close,"Stop command",tint=Color(0xFFFF6B6B))}
+                IconButton(onClick={stopCommand()},modifier=Modifier.size(30.dp)){Icon(Icons.Default.Close,"Stop command",tint=Color(0xFFFF6B6B))}
             }
-            IconButton(onClick={runCommand()},enabled=!busy,modifier=Modifier.size(34.dp)){Icon(Icons.Default.PlayArrow,"Run command",tint=if(busy)Color(0xFF4A5170) else Color(0xFF7AFF9B))}
         }
     }
 }
