@@ -1603,7 +1603,7 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
         // set exclusively from a real Groq "usage" object (see AIResponse.tokenUsage) — this
         // never estimates or invents a number, unlike a fixed "Context: 12K" label would.
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, bottom = 6.dp),
+            Modifier.fillMaxWidth().padding(start = 8.dp, top = 0.dp, end = 8.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             val usage = lastUsage
