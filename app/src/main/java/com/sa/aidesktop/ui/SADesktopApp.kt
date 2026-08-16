@@ -53,6 +53,7 @@ import com.sa.aidesktop.core.coding.*
 import com.sa.aidesktop.core.window.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.runtime.DisposableEffect
 import com.sa.aidesktop.core.voice.AndroidTextToSpeechEngine
 import com.sa.aidesktop.core.voice.AndroidSpeechToTextEngine
@@ -104,7 +105,22 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
         )
     }
     val files = remember(context) { AndroidProjectFileService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
-    val terminal = remember(context) { EmbeddedTerminalService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
+    // Real-Linux terminal (Rule 8 counterpart to the restricted EmbeddedShellBackend): once the
+    // user runs `bootstrap install` in Terminal, RoutingShellBackend switches every command from
+    // the allowlist sandbox to the real downloaded bash/busybox/apt environment. Nothing about
+    // EmbeddedShellBackend or EmbeddedTerminalService was removed — this only supplies a
+    // different ShellBackend to the same, unmodified terminal service.
+    // liveOutput carries progress/output lines WHILE a command is still running (bootstrap
+    // install's download %, or each real line of a running command) — TerminalWindow shows it
+    // live instead of the user staring at a blank screen until the whole thing finishes.
+    val terminalLiveOutput = remember { MutableStateFlow("") }
+    val terminal = remember(context) {
+        val workspaceRoot = context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")
+        EmbeddedTerminalService(
+            workspaceRoot,
+            RoutingShellBackend(workspaceRoot, LinuxBootstrapManager(context), onLiveOutput = { terminalLiveOutput.value = it })
+        )
+    }
     val browser = remember(context) { AndroidBrowserService(context, context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
     val githubAccounts = remember(context) { GitHubAccountStore(context) }
     val githubApi = remember(githubAccounts) { GitHubApiClient(githubAccounts) }
@@ -249,7 +265,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
                     when(w.type){
                         WindowType.DEVELOPER->DeveloperWindow(files)
                         WindowType.AI->AIWindow(browser, settingsStore, offlineAi)
-                        WindowType.TERMINAL->TerminalWindow(terminal)
+                        WindowType.TERMINAL->TerminalWindow(terminal, terminalLiveOutput)
                         WindowType.GIT->GitWindow(files, githubAccounts, githubApi)
                         WindowType.FILES->FilesWindow(files)
                         WindowType.SETTINGS->SettingsWindow(settingsStore, offlineAi)
@@ -402,8 +418,30 @@ private val RESIZE_HANDLE_INSET = 12.dp
             }
             val current = buffers[selectedTab].orEmpty()
             val dirty = current != savedBuffers[selectedTab]
+            // BUG FIX (Rule 1/17 endpoint-correctness): EditorTabs only ever shows the bare
+            // filename (path.substringAfterLast('/')), so a file opened from a sub-folder (e.g.
+            // the default "src/main.py") looked identical to a tab for "main.py" at the workspace
+            // root. The terminal's cwd is the workspace root, not "src/", so `python main.py`
+            // failed with "No such file or directory" even though the file was genuinely saved —
+            // the user had no way to see the real relative path to run it from. This status-bar
+            // line now always shows the real relative path (never just the filename), plus the
+            // exact runnable command for the file's own language, so what to type in Terminal is
+            // never a guess.
+            val runHint = when (selectedTab.substringAfterLast('.', "").lowercase()) {
+                "py" -> "python $selectedTab"
+                "js" -> "node $selectedTab"
+                else -> null
+            }
             Row(Modifier.fillMaxWidth().height(30.dp).background(Color(0xFF0B0C13)).padding(horizontal=10.dp),verticalAlignment=Alignment.CenterVertically){
                 Text("Ln 1, Col 1",fontSize=9.sp,color=Color(0xFFAAB4D4))
+                Spacer(Modifier.width(12.dp))
+                if (selectedTab.isNotBlank()) {
+                    Text(selectedTab,fontSize=9.sp,color=Color(0xFF6F7C9F),maxLines=1)
+                }
+                if (runHint != null) {
+                    Spacer(Modifier.width(12.dp))
+                    Text("Run: $runHint",fontSize=9.sp,color=Color(0xFF7FA8E0),maxLines=1)
+                }
                 Spacer(Modifier.weight(1f))
                 Text(if(dirty) "Unsaved changes" else "Saved",fontSize=9.sp,color=if(dirty) Color(0xFFFFB45B) else Color(0xFF7FE0A2))
                 Spacer(Modifier.width(12.dp))
@@ -423,7 +461,17 @@ private val RESIZE_HANDLE_INSET = 12.dp
             val dirty = buffers[path] != saved[path]
             Surface(Modifier.padding(start=2.dp,top=2.dp,bottom=2.dp).widthIn(min=115.dp).height(32.dp).clickable{onSelect(path)}, color=if(active)Color(0xFF15182A)else Color.Transparent, shape=RoundedCornerShape(topStart=7.dp,topEnd=7.dp)){
                 Row(Modifier.fillMaxSize().padding(horizontal=8.dp),verticalAlignment=Alignment.CenterVertically){
-                    Text(if(dirty) "● " else "",fontSize=9.sp,color=Color(0xFFFFB45B)); Text(path.substringAfterLast('/'),Modifier.weight(1f),fontSize=10.sp,color=if(active)Color.White else Color(0xFF8E98B3),maxLines=1)
+                    // BUG FIX (same root cause as the status-bar fix above): showing only the bare
+                    // filename made a file inside a sub-folder (e.g. "src/main.py") visually
+                    // identical to one at the workspace root ("main.py"). When two open tabs would
+                    // otherwise collide on that bare name, show "parentFolder/file.ext" instead so
+                    // the tab itself already disambiguates — no click/hover needed to find out.
+                    val collidesWithAnotherTab = tabs.any { other -> other != path && other.substringAfterLast('/') == path.substringAfterLast('/') }
+                    val label = if (collidesWithAnotherTab && path.contains('/')) {
+                        val parent = path.substringBeforeLast('/').substringAfterLast('/')
+                        "$parent/${path.substringAfterLast('/')}"
+                    } else path.substringAfterLast('/')
+                    Text(if(dirty) "● " else "",fontSize=9.sp,color=Color(0xFFFFB45B)); Text(label,Modifier.weight(1f),fontSize=10.sp,color=if(active)Color.White else Color(0xFF8E98B3),maxLines=1)
                     IconButton({onClose(path)},Modifier.size(22.dp)){Icon(Icons.Default.Close,"Close",Modifier.size(12.dp),tint=Color(0xFF7E89A8))}
                 }
             }
@@ -578,7 +626,13 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
 @Composable private fun AIWindow(browser: AndroidBrowserService, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine){
     val context = LocalContext.current
     val files = remember(context) { AndroidProjectFileService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
-    val terminal = remember(context) { EmbeddedTerminalService(context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")) }
+    // Same real-Linux routing as the Terminal window above (Rule 4: one chain, not two divergent
+    // ones) — Sara's `run_terminal` tool goes through the identical RoutingShellBackend, so a
+    // command Sara runs and a command the user types behave identically.
+    val terminal = remember(context) {
+        val workspaceRoot = context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")
+        EmbeddedTerminalService(workspaceRoot, RoutingShellBackend(workspaceRoot, LinuxBootstrapManager(context)))
+    }
     val workspaceManager = remember(context) { ProjectWorkspaceManager(context.filesDir.resolve("SA-AIDesktop/workspaces")) }
     val aiWeb = remember(browser) { AIWebService(browser) }
     val gitRoot = context.filesDir.resolve("SA-AIDesktop/workspace/MyProject")
@@ -1141,14 +1195,36 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     }
 }
 
-@Composable private fun TerminalWindow(terminal: TerminalService){
+@Composable private fun TerminalWindow(terminal: TerminalService, liveOutput: kotlinx.coroutines.flow.StateFlow<String>){
     var input by remember{mutableStateOf("")}
     val initial=terminal.state()
     val out=remember{mutableStateListOf("SA Embedded Terminal","Workspace: ${initial.workingDirectory}","Type help for supported commands.","user@sa-desktop:~/MyProject$")}
+    // BUG FIX (Rule 14 weakness-check on RealLinuxShellBackend just added): this used to call
+    // terminal.execute() directly on the composable's own (UI) thread. That was already
+    // questionable for the old restricted sandbox, but `bootstrap install` (real network
+    // download + extraction, can take well over a minute) or a real `apt install`/`git clone`
+    // through the same blocking call would freeze the whole app and risk an Android ANR. Now
+    // matches the pattern ProjectCodingTools.kt already uses for the same reason: run on
+    // Dispatchers.IO, keep a `busy` flag so the UI stays responsive and a second command can't
+    // be submitted mid-run, and echo the submitted line immediately so the wait is visible.
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    // Live progress/output (new): reflects RoutingShellBackend.onLiveOutput while busy — a real
+    // `bootstrap install` download %, or each line of a long real command — instead of the
+    // terminal showing nothing until the whole thing finishes.
+    val live by liveOutput.collectAsState()
     fun runCommand(){
-        val r=terminal.execute(input); input=""
-        if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}"); out.add("user@sa-desktop:~/MyProject$") }
+        if (busy || input.isBlank()) return
+        val submitted = input; input=""; busy = true
+        out.add("user@sa-desktop:~/MyProject$ $submitted")
+        scope.launch {
+            val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { terminal.execute(submitted) }
+            if(r.output=="__CLEAR__") out.clear() else { if(r.output.isNotEmpty()) out.add(r.output); out.add("exit code: ${r.exitCode}") }
+            out.add("user@sa-desktop:~/MyProject$")
+            busy = false
+        }
     }
+    fun stopCommand(){ if (busy) scope.launch { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { terminal.cancel() } } }
     // BUG FIX (screenshot: taps around the terminal seemingly "sending" input): audited every
     // pointer handler in this window. The scrollable output Column below has no clickable/
     // pointerInput of its own (only its own verticalScroll gesture), the input TextField has no
@@ -1169,6 +1245,9 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
     }
     Column(Modifier.fillMaxSize().background(Color(0xFF050609))){
         Column(Modifier.weight(1f).verticalScroll(termScroll).padding(10.dp)){out.forEach{Text(it,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFFE0E6FF))}}
+        if (busy && live.isNotBlank()) {
+            Text(live,fontFamily=FontFamily.Monospace,fontSize=10.sp,color=Color(0xFF7FA8E0),modifier=Modifier.padding(horizontal=10.dp))
+        }
         Row(Modifier.padding(8.dp),verticalAlignment=Alignment.CenterVertically){
             Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B))
             // BUG FIX (screenshot: terminal typed input invisible next to "$"): the transparent
@@ -1177,7 +1256,7 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
             // terminal-style color. Text/cursor/selection colors are now explicit while keeping
             // the transparent background, monospace font, and existing command-execution logic.
             TextField(
-                input,{input=it},Modifier.weight(1f),singleLine=true,
+                input,{input=it},Modifier.weight(1f),singleLine=true,enabled=!busy,
                 colors=TextFieldDefaults.colors(
                     focusedContainerColor=Color.Transparent,unfocusedContainerColor=Color.Transparent,
                     focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
@@ -1187,7 +1266,13 @@ private fun AnnotatedString.Builder.appendMarkdownInline(line: String) {
                 ),
                 textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFFE0E6FF))
             )
-            IconButton(onClick={runCommand()},modifier=Modifier.size(34.dp)){Icon(Icons.Default.PlayArrow,"Run command",tint=Color(0xFF7AFF9B))}
+            // Stop button (new): needed now that real commands (bootstrap install, apt install,
+            // git clone) can genuinely run for a while — previously there was no way to interrupt
+            // a running command from this window at all, only an internal 10s auto-timeout.
+            if (busy) {
+                IconButton(onClick={stopCommand()},modifier=Modifier.size(34.dp)){Icon(Icons.Default.Close,"Stop command",tint=Color(0xFFFF6B6B))}
+            }
+            IconButton(onClick={runCommand()},enabled=!busy,modifier=Modifier.size(34.dp)){Icon(Icons.Default.PlayArrow,"Run command",tint=if(busy)Color(0xFF4A5170) else Color(0xFF7AFF9B))}
         }
     }
 }
