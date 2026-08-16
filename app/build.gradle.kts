@@ -29,7 +29,7 @@ android {
     }
 }
 
-android { namespace = "com.sa.aidesktop"; compileSdk = 35
+android { namespace = "com.sa.aidesktop"; compileSdk = 36
     defaultConfig {
         applicationId = "com.sa.aidesktop"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a"; abiFilters += "x86_64" } // x86_64 added so the CI emulator (which is x86_64) can run the embedded-Python instrumented test; arm64-v8a (real devices) is unchanged
     }
