@@ -53,11 +53,16 @@ chaquopy {
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
-    // NOTE: "dev.ffmpegkit-maintained:llama-android:0.1.1" was removed here - it is not a real
-    // published Maven artifact (verified: it does not exist on Maven Central or any other
-    // repository), so Gradle could never resolve it and the build always failed at dependency
-    // resolution. See the class doc on LocalLlamaEngine for how that adapter now behaves
-    // honestly without it.
+    // NOTE: "dev.ffmpegkit-maintained:llama-android:0.1.1" was removed here previously - it is
+    // not a real published Maven artifact (verified: it does not exist on Maven Central or any
+    // other repository), so Gradle could never resolve it and the build always failed at
+    // dependency resolution.
+    // Real replacement, verified on Maven Central (https://central.sonatype.com/artifact/com.llamatik/library):
+    // Llamatik - a Kotlin Multiplatform wrapper around llama.cpp, Apache-2.0, Android minSdk 26
+    // (matches this app's minSdk). LocalLlamaEngine calls it via
+    // com.llamatik.library.platform.LlamaBridge for real on-device GGUF inference - no NDK/CMake
+    // setup needed in this module, the AAR bundles the native llama.cpp build itself.
+    implementation("com.llamatik:library:1.10.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")

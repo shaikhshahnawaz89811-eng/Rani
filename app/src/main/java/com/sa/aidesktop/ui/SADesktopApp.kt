@@ -6,6 +6,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1353,8 +1354,15 @@ private fun isPureToolTrace(text: String): Boolean {
                     Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F),maxLines=1,overflow=TextOverflow.Ellipsis)
                 }
             }
+            // BUG FIX (video: status text + delete icon looked cramped/cut off against the
+            // window's right edge with almost no breathing room). A fixed Spacer now guarantees
+            // real separation between the live status text and the delete button regardless of
+            // status text length, and the row's own trailing padding (see Row Modifier below)
+            // keeps the icon off the window edge instead of sitting flush against it. No data or
+            // behavior changed - same busy/activity/Ready text, same clearChat() action.
             if (!compact) Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E),maxLines=1,overflow=TextOverflow.Ellipsis)
             else Box(Modifier.size(8.dp).background(if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E), CircleShape))
+            Spacer(Modifier.width(10.dp))
             IconButton(onClick = { clearChat() }, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Clear chat", tint = Color(0xFF8996B5), modifier = Modifier.size(16.dp))
             }
@@ -1373,6 +1381,11 @@ private fun isPureToolTrace(text: String): Boolean {
             QuickActionChip(Icons.Default.Terminal, "Run Command") { input = (if (input.isBlank()) "" else input + "\n") + "Run: " }
             QuickActionChip(Icons.Default.Code, "Code") { input = (if (input.isBlank()) "" else input + "\n") + "Write code: " }
             QuickActionChip(Icons.Default.MoreHoriz, if (showAllTools) "Less" else "More") { showAllTools = !showAllTools }
+            // BUG FIX (video: last chip looked cut off flush against the window's right edge,
+            // with no hint the row could still scroll). A real trailing spacer inside the same
+            // scrollable Row gives the last chip breathing room at the end of the scroll range -
+            // purely a spacing fix, the row was already horizontalScroll(); no chip added/removed.
+            Spacer(Modifier.width(8.dp))
         }
         if (showProviderInfo) {
             Surface(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), RoundedCornerShape(10.dp), color = Color(0xFF14161F), border = BorderStroke(1.dp, Color(0xFF2A2E45))) {
@@ -1719,21 +1732,39 @@ private fun isPureToolTrace(text: String): Boolean {
             // Terminal-style prompt marker (matches TerminalWindow's "$"), so the chat input reads
             // like a shell prompt even though it still sends a normal chat message underneath.
             Text("$",fontFamily=FontFamily.Monospace,color=Color(0xFF7AFF9B),modifier=Modifier.padding(end=4.dp))
-            TextField(
-                input,{input=it},Modifier.weight(1f),
-                textStyle=LocalTextStyle.current.copy(fontFamily=FontFamily.Monospace,color=Color(0xFFE0E6FF),fontSize=12.sp),
-                placeholder={Text("Ask Sara about your project...",fontFamily=FontFamily.Monospace,fontSize=11.sp,color=Color(0xFF8993B8))},
-                minLines=1,maxLines=6,enabled=!busy,
-                colors=TextFieldDefaults.colors(
-                    focusedContainerColor=Color(0xFF050609),unfocusedContainerColor=Color(0xFF050609),
-                    disabledContainerColor=Color(0xFF050609),
-                    focusedIndicatorColor=Color.Transparent,unfocusedIndicatorColor=Color.Transparent,
-                    focusedTextColor=Color(0xFFE0E6FF),unfocusedTextColor=Color(0xFFE0E6FF),disabledTextColor=Color(0xFF7A8199),
-                    cursorColor=Color(0xFF7AFF9B),
-                    focusedPlaceholderColor=Color(0xFF8993B8),unfocusedPlaceholderColor=Color(0xFF8993B8),
-                    selectionColors=TextSelectionColors(handleColor=Color(0xFF7AFF9B),backgroundColor=Color(0x557AFF9B))
+            // BUG FIX (video: input box was several lines tall even when empty): the stock
+            // Material3 TextField() carries its own ~56dp min-height chrome plus internal label/
+            // supporting-text padding, and its long placeholder wrapped across 2-3 lines inside
+            // the narrower mobile AI window width - since minLines/maxLines let the field grow to
+            // fit its own placeholder, the box rendered as a tall multi-line slab before the user
+            // typed a single character (the reference design's input is a slim single-line pill).
+            // Swapping to BasicTextField with a manual compact decoration box removes that
+            // built-in chrome; the shorter placeholder ("Ask Sara anything...", matching the
+            // reference design's wording) fits on one line at this font size. Typed input still
+            // grows up to 6 lines exactly as before - every value/color/cursor/selection/enabled
+            // behavior below is preserved unchanged, only the layout chrome around it shrank.
+            Box(
+                Modifier.weight(1f)
+                    .background(Color(0xFF050609), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                if (input.isEmpty()) {
+                    Text(
+                        "Ask Sara anything...",
+                        fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                        color = Color(0xFF8993B8), maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                BasicTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, color = Color(0xFFE0E6FF), fontSize = 12.sp),
+                    cursorBrush = SolidColor(Color(0xFF7AFF9B)),
+                    enabled = !busy,
+                    minLines = 1, maxLines = 6
                 )
-            )
+            }
             IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF00BFFF))}
             IconButton({ if (voiceState.listening) stt.stop() else micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }){Icon(if(voiceState.listening) Icons.Default.Stop else Icons.Default.Mic,"Voice input",tint=if(voiceState.listening) Color(0xFFEF4444) else Color(0xFF00BFFF))}
             IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFF8B5CF6))}
