@@ -98,8 +98,17 @@ class GroqClient(
                     } else if (outcome.error is GroqError.RateLimited && outcome.error.retryAfterSeconds != null) {
                         // Groq told us the exact real wait — honor that instead of the generic
                         // fixed backoff, capped so one 429 can't stall the UI indefinitely.
-                        val waitMs = (outcome.error.retryAfterSeconds * 1000L).coerceAtMost(MAX_RATE_LIMIT_WAIT_MS)
-                        delay(waitMs)
+                        val realWaitMs = outcome.error.retryAfterSeconds * 1000L
+                        if (isRateResetBeyondRetryBudget(realWaitMs)) {
+                            // Groq's real reset (e.g. a daily token-limit window, tens of minutes
+                            // away) is longer than we're willing to block on. Waiting our capped
+                            // amount and retrying would hit the exact same rejection again — Groq
+                            // already told us it won't lift before then — so burning the rest of
+                            // the retry budget on guaranteed-identical failures would only waste
+                            // the user's time. Stop now and surface the real message instead.
+                            return@withContext outcome
+                        }
+                        delay(realWaitMs.coerceAtMost(MAX_RATE_LIMIT_WAIT_MS))
                     } else {
                         delay(RETRY_BACKOFF_MS * (attempt + 1))
                     }
@@ -109,6 +118,14 @@ class GroqClient(
         }
         lastFailure
     }
+
+    /** Rule 15 sub-helper of [chatConversation]'s rate-limit branch: single job of deciding
+     *  whether Groq's own reported reset time is longer than [MAX_RATE_LIMIT_WAIT_MS] — i.e.
+     *  whether waiting our capped amount could ever actually cross into the real reset window.
+     *  A short per-minute burst (a few seconds) stays retryable as before; a daily-token-limit
+     *  reset (minutes away) is correctly recognised as not something a capped in-app wait can
+     *  fix this turn. */
+    private fun isRateResetBeyondRetryBudget(realWaitMs: Long): Boolean = realWaitMs > MAX_RATE_LIMIT_WAIT_MS
 
     private fun isRetryable(error: GroqError): Boolean = when (error) {
         is GroqError.RateLimited, is GroqError.ServiceUnavailable, is GroqError.Timeout -> true

@@ -159,6 +159,25 @@ class GroqClientTest {
         assertEquals(15, error.retryAfterSeconds)
     }
 
+    @Test fun rateLimitBeyondRetryBudgetFailsFastWithoutWastingRetries() = runBlocking {
+        // A real daily-token-limit rejection (Groq reports the reset tens of minutes away, far
+        // past MAX_RATE_LIMIT_WAIT_MS). Retrying could never succeed before then, so the client
+        // should surface the real failure after the first attempt instead of burning the whole
+        // retryLimit on guaranteed-identical 429s.
+        val attempts = AtomicInteger(0)
+        val url = startServer { request ->
+            attempts.getAndIncrement()
+            respond(
+                request, 429,
+                """{"error":{"message":"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_1` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 96182, Requested 5976. Please try again in 1864.512s."}}"""
+            )
+        }
+        val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)
+        val result = client.chat("hi", GroqSettings(retryLimit = 3), null, emptyList())
+        assertTrue((result as GroqResult.Failure).error is GroqError.RateLimited)
+        assertEquals(1, attempts.get())
+    }
+
     @Test fun rateLimitWithoutRetryAfterWordingLeavesItNull() = runBlocking {
         val url = startServer { request -> respond(request, 429, """{"error":{"message":"rate limited"}}""") }
         val client = GroqClient(apiKeyProvider = { "k" }, endpoint = url)

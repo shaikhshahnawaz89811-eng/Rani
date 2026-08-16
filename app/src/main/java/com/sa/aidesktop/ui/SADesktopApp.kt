@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
@@ -692,16 +693,41 @@ private fun workflowStepVisual(kind: WorkflowStepKind): Pair<Color, androidx.com
     }
 }
 
+/** Icon shaking side-to-side — "Shake" in the reference design's Animation Guide, used for
+ *  Error. A real horizontal-offset infinite animation (not a re-skinned pulse), so a failing
+ *  step is visually distinct from a normal in-progress step at a glance. */
+@Composable private fun ShakeIndicator(color: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shake")
+    val offset by transition.animateFloat(
+        initialValue = -1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(90, easing = LinearEasing), RepeatMode.Reverse),
+        label = "shakeOffset"
+    )
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Icon(
+            Icons.Default.Warning, null, tint = color,
+            modifier = Modifier.size(12.dp).offset(x = (offset * 2).dp)
+        )
+    }
+}
+
 /** Dispatches the real animation style per real, currently-open WorkflowStepKind (Rule 1
  *  endpoint: every kind maps to something, nothing falls through to a generic default). Only
  *  reached for an OPEN step — a finished step already shows its static icon via
- *  [workflowStepVisual], unchanged. */
+ *  [workflowStepVisual], unchanged. Mapping matches the reference design's Animation Guide:
+ *  Pulse=Planning/Editing, Wave=Analyzing, Scan(running dots)=Investigating/Building,
+ *  Shake=Error. Success is a completed/closed state in practice (it always carries an
+ *  endedAtMs), so it renders via the static check-circle icon in [workflowStepVisual] rather
+ *  than reaching this dispatcher — Pulse is kept here only as a safe, real fallback if a
+ *  SUCCESS step is ever still open. */
 @Composable private fun StepAnimationIndicator(kind: WorkflowStepKind, color: Color, modifier: Modifier = Modifier) {
     when (kind) {
         WorkflowStepKind.PLANNING, WorkflowStepKind.EDITING -> PulseDotIndicator(color, modifier)
         WorkflowStepKind.ANALYZING -> WaveBarsIndicator(color, modifier)
         WorkflowStepKind.INVESTIGATING, WorkflowStepKind.BUILDING -> RunningDotsIndicator(color, modifier)
-        WorkflowStepKind.SUCCESS, WorkflowStepKind.ERROR -> PulseDotIndicator(color, modifier)
+        WorkflowStepKind.ERROR -> ShakeIndicator(color, modifier)
+        WorkflowStepKind.SUCCESS -> PulseDotIndicator(color, modifier)
     }
 }
 
@@ -826,6 +852,56 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
     return ParsedBuildResult(success, exitInfo, command, output)
 }
 
+// Rule 15 sub-helper of the chat bubble list (single job: recognise a message that is ONLY raw
+// tool-trace lines — "TOOL x ✓", "TOOL x ✗", "APPROVAL REQUIRED: ...", "LOCAL TOOL ...", "NOTE: ..."
+// — so it can get the same colored/iconed treatment as FileDiffCard/BuildResultCard instead of a
+// flat text bubble. Doesn't change what text exists (Rule 1 endpoint unchanged, same real trace
+// strings from ModelRouter) — only how an ALREADY-trace-only message is displayed (Rule 13
+// cleaner-viewer). Any message with a single non-trace line (e.g. a normal assistant reply) still
+// falls through to the plain bubble, so nothing that used to render is lost.
+private val TOOL_TRACE_PREFIXES = listOf("TOOL ", "LOCAL TOOL ", "APPROVAL REQUIRED:", "NOTE:")
+private fun isPureToolTrace(text: String): Boolean {
+    val lines = text.split('\n').filter { it.isNotBlank() }
+    if (lines.isEmpty()) return false
+    return lines.all { line -> TOOL_TRACE_PREFIXES.any { line.trimStart().startsWith(it) } }
+}
+
+/** Renders one already-real trace line (see [isPureToolTrace]) with an icon/color that matches
+ *  its real outcome — success (✓), failure (✗), or needs-approval — instead of plain white text.
+ *  Parses only the fixed prefixes ModelRouter already emits; anything unrecognised still prints
+ *  as plain text so no line is ever silently dropped. */
+@Composable private fun ToolTraceLine(line: String) {
+    val trimmed = line.trim()
+    val (icon, tint) = when {
+        trimmed.startsWith("APPROVAL REQUIRED:") -> Icons.Default.Warning to Color(0xFFF59E0B)
+        trimmed.contains("✓") -> Icons.Default.CheckCircle to Color(0xFF22C55E)
+        trimmed.contains("✗") -> Icons.Default.Error to Color(0xFFEF4444)
+        trimmed.startsWith("NOTE:") -> Icons.Default.Info to Color(0xFF9BCBFF)
+        else -> Icons.Default.Bolt to Color(0xFF9BCBFF)
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(12.dp), tint = tint)
+        Spacer(Modifier.width(6.dp))
+        Text(trimmed, fontSize = 10.sp, color = Color(0xFFC7CEE4), fontFamily = FontFamily.Monospace)
+    }
+}
+
+/** Card wrapper for a trace-only message — same shape/border language as FileDiffCard/
+ *  BuildResultCard so the three "structured" card types feel consistent instead of one being a
+ *  flat bubble. */
+@Composable private fun ToolTraceCard(text: String) {
+    Surface(
+        Modifier.padding(vertical = 4.dp).widthIn(max = 300.dp),
+        RoundedCornerShape(12.dp),
+        color = Color(0xFF14161F),
+        border = BorderStroke(1.dp, Color(0xFF2A2E45))
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            text.split('\n').filter { it.isNotBlank() }.forEach { ToolTraceLine(it) }
+        }
+    }
+}
+
 @Composable private fun FileDiffCard(path: String, summaryLine: String, diffLines: List<Pair<Char, String>>, fullContent: String?) {
     var expanded by remember(path, fullContent) { mutableStateOf(false) }
     Surface(
@@ -860,7 +936,7 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
                     )
                 } else {
                     diffLines.forEach { (kind, lineText) ->
-                        val bg = when (kind) { '+' -> Color(0x2622C55E); '-' -> Color(0x26EF4444); else -> Color.Transparent }
+                        val bg = when (kind) { '+' -> Color(0xFF15391F); '-' -> Color(0xFF4A1B1F); else -> Color.Transparent }
                         val fg = when (kind) { '+' -> Color(0xFF86EFAC); '-' -> Color(0xFFFCA5A5); else -> Color(0xFF9AA4C4) }
                         Row(Modifier.fillMaxWidth().background(bg).padding(horizontal = 10.dp, vertical = 1.dp)) {
                             Text(kind.toString(), fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = fg, modifier = Modifier.width(14.dp))
@@ -1242,7 +1318,19 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
+    // Rule 12 (design-first) / Rule 21 (existing-behavior preserving): the window can be dragged
+    // to any width down to its real minSizeFor(AI)=300.dp (DesktopWindowManager), but until now
+    // the header always tried to draw all three text lines (name, provider status, tools/agent)
+    // at full size regardless of how little width was actually available — on a real narrow/"mini"
+    // window that means wrapped or clipped text instead of the clean compact header the design
+    // calls for ("Mini Window: compact view with icons & key info only"). BoxWithConstraints reads
+    // the REAL available width at composition time (no guessed/fixed breakpoint tied to a device),
+    // so the header adapts live as the same window is dragged wider/narrower. Nothing here removes
+    // a line of real data — the secondary status/tools text simply doesn't render below the
+    // threshold where it would no longer fit cleanly; every value is still the same live state.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compact = maxWidth < 340.dp
+        Column(Modifier.fillMaxSize().background(Color(0xFF080911))){
         // Header status: real connection state only (Rule 10 — never fake "Online"). Declared at
         // this scope (not inside the header Row below) because the "Groq AI" quick-action info
         // panel further down reuses the exact same value — one real status, shown in two places.
@@ -1258,12 +1346,15 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(6.dp).background(statusColor, CircleShape))
                     Spacer(Modifier.width(5.dp))
-                    Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF))
+                    Text(profile.name,fontSize=13.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F0FF),maxLines=1,overflow=TextOverflow.Ellipsis)
                 }
-                Text("$statusText • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5))
-                Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F))
+                if (!compact) {
+                    Text("$statusText • ${profile.language}",fontSize=9.sp,color=Color(0xFF8996B5),maxLines=1,overflow=TextOverflow.Ellipsis)
+                    Text("Tools: ${tools.all().size} • Agent: ${taskEngine.current()?.state ?: "IDLE"}",fontSize=7.sp,color=Color(0xFF6F7D9F),maxLines=1,overflow=TextOverflow.Ellipsis)
+                }
             }
-            Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E))
+            if (!compact) Text(if(busy) activity else "Ready",fontSize=9.sp,color=if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E),maxLines=1,overflow=TextOverflow.Ellipsis)
+            else Box(Modifier.size(8.dp).background(if(busy) Color(0xFFF59E0B) else Color(0xFF22C55E), CircleShape))
             IconButton(onClick = { clearChat() }, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Clear chat", tint = Color(0xFF8996B5), modifier = Modifier.size(16.dp))
             }
@@ -1338,10 +1429,25 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
             msgs.forEach{m->
                 val buildResult = if (!m.fromUser) parseBuildResultMessage(m.text) else null
                 val fileDiff = if (!m.fromUser && buildResult == null) parseFileDiffMessage(m.text) else null
-                Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start){
+                val traceOnly = if (!m.fromUser && buildResult == null && fileDiff == null) isPureToolTrace(m.text) else false
+                // Design match: every Sara message carries her small round avatar to its left
+                // (see the mockup's chat feed) — user messages stay avatar-less on the right,
+                // unchanged. Purely additive: same bubble/card content as before, just prefixed
+                // with the same avatar image already used in the header (Rule 4: one avatar
+                // asset, not a second copy).
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=if(m.fromUser)Arrangement.End else Arrangement.Start, verticalAlignment=Alignment.Top){
+                    if (!m.fromUser) {
+                        androidx.compose.foundation.Image(
+                            painterResource(R.drawable.sara_avatar), contentDescription = null,
+                            modifier = Modifier.padding(top = 4.dp).size(22.dp).clip(CircleShape),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
                     when {
                         buildResult != null -> BuildResultCard(buildResult, m.time)
                         fileDiff != null -> FileDiffCard(fileDiff.path, fileDiff.summaryLine, fileDiff.diffLines, fileDiff.fullContent)
+                        traceOnly -> ToolTraceCard(m.text)
                         else -> Surface(Modifier.padding(vertical=4.dp).widthIn(max=300.dp),RoundedCornerShape(12.dp),color=if(m.fromUser)Color(0xFF4D1A78)else Color(0xFF171820)){Text(renderChatMarkdown(m.text),Modifier.padding(10.dp),fontSize=12.sp,color=if(m.fromUser)Color(0xFFF5EEFF)else Color(0xFFE7EAF7))}
                     }
                 }
@@ -1350,7 +1456,13 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
             // turn is in flight — real activityStatus label (Thinking…/Coding…/Browsing…/Git…/
             // Running…) set from the actual tool ids about to run (ModelRouter.activityLabel),
             // never a guessed/generic word.
-            if(busy) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Start){
+            if(busy) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.Start, verticalAlignment=Alignment.Top){
+                androidx.compose.foundation.Image(
+                    painterResource(R.drawable.sara_avatar), contentDescription = null,
+                    modifier = Modifier.padding(top = 4.dp).size(22.dp).clip(CircleShape),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+                Spacer(Modifier.width(6.dp))
                 Surface(
                     Modifier.padding(vertical=4.dp).clickable { showThinkingDetails = !showThinkingDetails },
                     RoundedCornerShape(12.dp),color=Color(0xFF171820)
@@ -1393,7 +1505,35 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
                         fontSize = 9.sp,
                         color = Color(0xFFAFA7BE)
                     )
-                    if (request.input.isNotEmpty()) {
+                    // Rule 13 cleaner-viewer / Rule 15 sub-helper: for a real write_file request,
+                    // show the same red/green diff preview the applied result gets later, computed
+                    // from the real on-disk "before" content via the same ChatDiffUtil the tool
+                    // itself uses (Rule 4: one diff chain, not a second fake one) — instead of
+                    // dumping the raw new-content string. Any other tool (or a write_file whose
+                    // diff can't be computed, e.g. a brand-new file with a huge body) still falls
+                    // back to the original plain "Input: ..." line, so nothing is hidden.
+                    val previewDiff = remember(request) {
+                        if (request.toolId != "write_file") return@remember null
+                        val path = request.input["path"]?.trim().orEmpty()
+                        val newContent = request.input["content"] ?: return@remember null
+                        if (path.isBlank()) return@remember null
+                        val oldContent = files.read(path).let { if (it.isSuccess) it.value.orEmpty() else "" }
+                        val diff = ChatDiffUtil.lineDiff(oldContent.lines(), newContent.lines()) ?: return@remember null
+                        path to ChatDiffUtil.collapseContext(diff).filter { it.length >= 2 }.map { it[0] to it.substring(2) }
+                    }
+                    if (previewDiff != null) {
+                        Text(previewDiff.first, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = Color(0xFF9BCBFF), modifier = Modifier.padding(top = 4.dp))
+                        Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                            previewDiff.second.forEach { (kind, lineText) ->
+                                val bg = when (kind) { '+' -> Color(0xFF15391F); '-' -> Color(0xFF4A1B1F); else -> Color.Transparent }
+                                val fg = when (kind) { '+' -> Color(0xFF86EFAC); '-' -> Color(0xFFFCA5A5); else -> Color(0xFF9AA4C4) }
+                                Row(Modifier.fillMaxWidth().background(bg)) {
+                                    Text(kind.toString(), fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = fg, modifier = Modifier.width(12.dp))
+                                    Text(lineText, fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = fg, maxLines = 3)
+                                }
+                            }
+                        }
+                    } else if (request.input.isNotEmpty()) {
                         Text(
                             "Input: ${request.input.entries.joinToString { "${it.key}=${it.value.take(160)}" }}",
                             fontSize = 8.sp,
@@ -1616,10 +1756,13 @@ private fun parseBuildResultMessage(text: String): ParsedBuildResult? {
                 "Tokens: $total (prompt $prompt / reply $completion)"
             }
             Text(
-                "Model: ${settingsStore.getModel()} • $tokensLabel",
+                if (compact) tokensLabel else "Model: ${settingsStore.getModel()} • $tokensLabel",
                 fontSize = 9.sp,
-                color = Color(0xFF6F7D9F)
+                color = Color(0xFF6F7D9F),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+        }
         }
     }
 }
