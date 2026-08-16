@@ -149,7 +149,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
         DesktopBackdrop()
         DesktopIcons(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it) })
         windows.filter { it.state != WindowState.MINIMIZED }.sortedBy { it.z }.forEach { w ->
-            DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal, browser, githubAccounts, githubApi, settingsStore, offlineAi)
+            DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal, terminalLiveOutput, browser, githubAccounts, githubApi, settingsStore, offlineAi)
         }
         Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false }, Modifier.align(Alignment.BottomCenter))
         if (startOpen) StartMenu(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it); startOpen = false }, modifier = Modifier.align(Alignment.BottomStart))
@@ -228,7 +228,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
     }
 }
 
-@Composable private fun DesktopWindowView(w: DesktopWindow, screenW:Float, screenH:Float, files: FileService, terminal: TerminalService, browser: AndroidBrowserService, githubAccounts: GitHubAccountStore, githubApi: GitHubApiClient, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine) {
+@Composable private fun DesktopWindowView(w: DesktopWindow, screenW:Float, screenH:Float, files: FileService, terminal: TerminalService, liveOutput: kotlinx.coroutines.flow.StateFlow<String>, browser: AndroidBrowserService, githubAccounts: GitHubAccountStore, githubApi: GitHubApiClient, settingsStore: AISettingsStore, offlineAi: LocalLlamaEngine) {
     val default = windowDefaults(w.type, screenW, screenH)
     LaunchedEffect(w.id, w.width, w.height) {
         if (w.width <= 0f || w.height <= 0f) manager.initializeBounds(w.id, default)
@@ -265,7 +265,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
                     when(w.type){
                         WindowType.DEVELOPER->DeveloperWindow(files)
                         WindowType.AI->AIWindow(browser, settingsStore, offlineAi)
-                        WindowType.TERMINAL->TerminalWindow(terminal, terminalLiveOutput)
+                        WindowType.TERMINAL->TerminalWindow(terminal, liveOutput)
                         WindowType.GIT->GitWindow(files, githubAccounts, githubApi)
                         WindowType.FILES->FilesWindow(files)
                         WindowType.SETTINGS->SettingsWindow(settingsStore, offlineAi)
