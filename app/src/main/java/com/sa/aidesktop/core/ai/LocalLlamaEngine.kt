@@ -139,6 +139,18 @@ class LocalLlamaEngine(
         if (loaded.state != LocalModelState.READY) {
             return@withLock AIResult.Failure(AIError.ModelUnavailable(loaded.error ?: "Local model is unavailable."))
         }
+        val cfg = configProvider().toLlamaConfig()
+        // ROOT-CAUSE FIX (Rule 17/20): request.prompt used to be sent to the native engine
+        // completely untrimmed, no matter how large — fine for a short chat question, but
+        // TaskEngine's own coordinator prompt (see TaskEngine.buildPrompt) for a coding/agent
+        // task like "calculator banao" can run 10,000-17,000 characters (task instructions +
+        // last tool result + accumulated context + project structure). That is the SAME prompt
+        // sent to Groq (huge real context window, handles it fine) and to this small on-device
+        // model (contextSize is only 2048-4096 tokens ≈ 8-16K characters total, shared with the
+        // system prompt, the context block, AND the reserved output tokens). An oversized prompt
+        // could eat the entire window by itself — exactly why a coding request could sit far
+        // longer than a plain question ever would, independent of how fast the model itself is.
+        val effectivePrompt = fitPromptToBudget(request.prompt, cfg)
         // THREADING FIX: real token generation is the heaviest native call in this class and was
         // previously running on whatever dispatcher called generate() (Main, from the chat
         // screen) — pushed onto Dispatchers.IO so it can no longer freeze the UI/ANR the app.
@@ -146,8 +158,8 @@ class LocalLlamaEngine(
             runCatching {
                 LlamaBridge.generateWithContext(
                     LOCAL_SYSTEM_PROMPT,
-                    fitContextToBudget(request, configProvider().toLlamaConfig()),
-                    request.prompt.trim()
+                    fitContextToBudget(request, effectivePrompt, cfg),
+                    effectivePrompt
                 )
             }
         }.getOrElse { t ->
@@ -189,6 +201,30 @@ class LocalLlamaEngine(
         }
     }.getOrDefault(false)
 
+    /** Sub-helper (Rule 15) — the fix for the root cause above: bounds [prompt] itself against
+     *  the model's real configured window, completely separate from [fitContextToBudget] which
+     *  only ever trimmed the conversation-history/project-context block. Only engages when the
+     *  prompt genuinely doesn't fit (a plain short chat question always returns unchanged) — a
+     *  small, targeted, single-purpose cut, not a rewrite of how prompts are built upstream. */
+    private fun fitPromptToBudget(prompt: String, cfg: LlamaConfig): String {
+        val trimmed = prompt.trim()
+        val reserveTokens = cfg.maxTokens + SAFETY_MARGIN_TOKENS
+        val budgetChars = (cfg.contextSize - reserveTokens).coerceAtLeast(MIN_CONTEXT_BUDGET_TOKENS) * CHARS_PER_TOKEN_ESTIMATE
+        // Prompt alone must still leave the context block (buildContextBlock) a real minimum
+        // share of the window — an oversized prompt should never be allowed to starve it to
+        // zero the way it silently could before this fix.
+        val promptBudgetChars = (budgetChars - LOCAL_SYSTEM_PROMPT.length - MIN_CONTEXT_BUDGET_TOKENS * CHARS_PER_TOKEN_ESTIMATE)
+            .coerceAtLeast(MIN_CONTEXT_BUDGET_TOKENS * CHARS_PER_TOKEN_ESTIMATE)
+        if (trimmed.length <= promptBudgetChars) return trimmed
+        // Keep the TAIL, not the head: TaskEngine.buildPrompt() (the usual source of an
+        // oversized prompt) puts static boilerplate instructions up front and the actionable,
+        // current information — state, last real tool result, completion markers — at the end.
+        // Never a silent cut (Rule 10) — this marker makes the trim visible in any transcript.
+        val notice = "[earlier instructions truncated to fit the on-device model's smaller context window]\n"
+        val keepChars = (promptBudgetChars - notice.length).coerceAtLeast(0)
+        return notice + trimmed.takeLast(keepChars)
+    }
+
     /** Everything except the system prompt and the current user turn: recent history (up to
      *  [historyDepth] turns) plus any real project context supplied for this request. Kept
      *  separate from [LOCAL_SYSTEM_PROMPT] and the user's own prompt so all three can be passed
@@ -220,12 +256,16 @@ class LocalLlamaEngine(
      *  Never touches the current user turn — only conversation history (dropped oldest-first) and
      *  supplied project-context fields are ever shortened; the estimate uses a standard
      *  ~4-chars-per-token heuristic (no tokenizer is available on this path), so the final result
-     *  is additionally hard-capped as a safety net in case the estimate runs a little low. */
-    private fun fitContextToBudget(request: AIRequest, cfg: LlamaConfig): String {
+     *  is additionally hard-capped as a safety net in case the estimate runs a little low.
+     *
+     *  Takes [effectivePrompt] (the already-[fitPromptToBudget]-trimmed prompt), not
+     *  [request].prompt directly — using the raw untrimmed prompt here would double-count and
+     *  under-budget the context block by however much fitPromptToBudget already cut. */
+    private fun fitContextToBudget(request: AIRequest, effectivePrompt: String, cfg: LlamaConfig): String {
         val reserveTokens = cfg.maxTokens + SAFETY_MARGIN_TOKENS
         val budgetTokens = (cfg.contextSize - reserveTokens).coerceAtLeast(MIN_CONTEXT_BUDGET_TOKENS)
         val budgetChars = budgetTokens * CHARS_PER_TOKEN_ESTIMATE
-        val fixedChars = LOCAL_SYSTEM_PROMPT.length + request.prompt.trim().length
+        val fixedChars = LOCAL_SYSTEM_PROMPT.length + effectivePrompt.length
         val contextBudgetChars = (budgetChars - fixedChars).coerceAtLeast(0)
 
         var historyDepth = MAX_HISTORY_TURNS
