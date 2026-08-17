@@ -1090,8 +1090,8 @@ private fun isPureToolTrace(text: String): Boolean {
         CodingTaskStore(context.filesDir.resolve("SA-AIDesktop/tasks/active.properties"))
     }
 
-    // Groq remains the online primary when a key exists. It uses the same registry/gateway as the
-    // local path; there is no second hidden tool system.
+    // Groq is opt-in (Settings > Online Mode) and, when on, uses the same registry/gateway as the
+    // offline path — there is no second hidden tool system. Offline is the real default tier.
     val groqClient = remember { GroqClient(apiKeyProvider = { settingsStore.getApiKey() }) }
     val router = remember(tools, offlineAi) {
         ModelRouter(
@@ -1099,7 +1099,10 @@ private fun isPureToolTrace(text: String): Boolean {
             offlineAi,
             hasApiKey = { settingsStore.hasApiKey() },
             settingsProvider = { settingsStore.toGroqSettings() },
-            toolRegistry = tools
+            toolRegistry = tools,
+            // Offline-first, real toggle: false by default (see AISettingsStore), so every
+            // request runs on the on-device model until the user turns this on in Settings.
+            onlineModeEnabled = { settingsStore.isOnlineModeEnabled() }
         )
     }
     val service: AIService = router
@@ -1168,7 +1171,7 @@ private fun isPureToolTrace(text: String): Boolean {
     val msgs = remember {
         mutableStateListOf(
             AIMessage(
-                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured — I run entirely on Groq." else "No Groq API key is configured yet. Add it in Settings to use Sara."}",
+                "Hello! I'm ${profile.name}. ${if (settingsStore.isOnlineModeEnabled()) (if (settingsStore.hasApiKey()) "Online Mode is on and Groq is configured." else "Online Mode is on but no Groq API key is set yet — add it in Settings.") else "Running fully offline on the on-device model. Turn on Online Mode in Settings if you want Groq instead."}",
                 false,
                 "Now"
             ),
@@ -1225,7 +1228,7 @@ private fun isPureToolTrace(text: String): Boolean {
         msgs.clear()
         msgs.add(
             AIMessage(
-                "Hello! I'm ${profile.name}. ${if (settingsStore.hasApiKey()) "Groq is configured — I run entirely on Groq." else "No Groq API key is configured yet. Add it in Settings to use Sara."}",
+                "Hello! I'm ${profile.name}. ${if (settingsStore.isOnlineModeEnabled()) (if (settingsStore.hasApiKey()) "Online Mode is on and Groq is configured." else "Online Mode is on but no Groq API key is set yet — add it in Settings.") else "Running fully offline on the on-device model. Turn on Online Mode in Settings if you want Groq instead."}",
                 false,
                 "Now"
             )
@@ -1335,8 +1338,31 @@ private fun isPureToolTrace(text: String): Boolean {
         // Header status: real connection state only (Rule 10 — never fake "Online"). Declared at
         // this scope (not inside the header Row below) because the "Groq AI" quick-action info
         // panel further down reuses the exact same value — one real status, shown in two places.
-        val statusText = when(tier){RouterTier.ONLINE_GROQ->"Groq (online)";RouterTier.OFFLINE_LOCAL->"Groq (online)";RouterTier.OFFLINE_LOCAL_UNAVAILABLE->settingsStore.getApiKey().let{ if(it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" };null->if(settingsStore.hasApiKey())"Groq configured" else "Groq API key missing"}
-        val statusColor = when { statusText.contains("online") -> Color(0xFF22C55E); statusText.contains("configured") -> Color(0xFFF59E0B); else -> Color(0xFFEF4444) }
+        // BUG FIX: this used to show "Groq (online)" for RouterTier.OFFLINE_LOCAL too, which was
+        // simply wrong — that tier means the on-device model just answered, not Groq. The status
+        // is now derived honestly per real tier, and the "no request yet" (null) case reflects
+        // the real active mode (offline-default vs. the user's own Online Mode toggle) instead of
+        // always assuming Groq.
+        val onlineOn = settingsStore.isOnlineModeEnabled()
+        val statusText = when(tier){
+            RouterTier.ONLINE_GROQ -> "Groq (online)"
+            RouterTier.OFFLINE_LOCAL -> "Offline (on-device)"
+            RouterTier.OFFLINE_LOCAL_UNAVAILABLE -> if (onlineOn) {
+                settingsStore.getApiKey().let { if (it.isNullOrBlank()) "Groq API key missing" else "Groq error — see chat" }
+            } else {
+                if (settingsStore.getLocalModelPath().isNullOrBlank()) "Offline model not configured" else "Offline model error — see chat"
+            }
+            null -> if (onlineOn) {
+                if (settingsStore.hasApiKey()) "Groq configured" else "Groq API key missing"
+            } else {
+                if (settingsStore.getLocalModelPath().isNullOrBlank()) "Offline mode — model not configured" else "Offline mode ready"
+            }
+        }
+        val statusColor = when {
+            statusText.contains("online") || statusText == "Offline (on-device)" || statusText == "Offline mode ready" -> Color(0xFF22C55E)
+            statusText.contains("configured") -> Color(0xFFF59E0B)
+            else -> Color(0xFFEF4444)
+        }
         Row(Modifier.fillMaxWidth().height(52.dp).background(Color(0xFF10121D)).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
             Surface(Modifier.size(34.dp),RoundedCornerShape(10.dp),color=Color(0xFF4D1A78)){androidx.compose.foundation.Image(painterResource(R.drawable.sara_avatar),contentDescription="Sara",modifier=Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),contentScale=androidx.compose.ui.layout.ContentScale.Crop)}
             // BUG FIX (latest screenshot: Sara's name still hard to see): this Text() had no
@@ -2187,6 +2213,7 @@ private data class NanoSession(
     val context=LocalContext.current
     val store=settingsStore
     val localModelManager = remember(context) { LocalModelManager(context) }
+    var onlineModeOn by remember { mutableStateOf(store.isOnlineModeEnabled()) }
     var apiKeyInput by remember{ mutableStateOf("") }
     var apiKeyConfigured by remember{ mutableStateOf(store.hasApiKey()) }
     var model by remember{ mutableStateOf(store.getModel()) }
@@ -2223,10 +2250,16 @@ private data class NanoSession(
         Text("Appearance",fontSize=13.sp,fontWeight=FontWeight.Bold);Text("Dark / deep purple / neon blue",fontSize=11.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(vertical=8.dp));Divider()
         Text("AI Profile",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Name: Sara\nVoice: replaceable adapter",fontSize=11.sp,color=Color(0xFF9AA7C8));Divider()
 
-        // Phase 1: real Groq provider configuration. The key is stored only through SecureStore
-        // (AndroidKeyStore-backed AES/GCM) and is never shown back in full once saved.
-        Text("AI Provider — Groq (online)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured — Sara cannot chat until this is set",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF22C55E) else Color(0xFFF59E0B),modifier=Modifier.padding(top=6.dp))
+        // Groq is opt-in now (Rule: real toggle, default off — see AISettingsStore). The key is
+        // stored only through SecureStore (AndroidKeyStore-backed AES/GCM) and is never shown back
+        // in full once saved.
+        Text("AI Provider — Groq (online, optional)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
+        Row(Modifier.fillMaxWidth().padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
+            Switch(checked=onlineModeOn,onCheckedChange={ onlineModeOn=it; store.setOnlineModeEnabled(it) })
+            Spacer(Modifier.width(8.dp))
+            Text(if(onlineModeOn) "Online Mode is ON — Sara uses Groq" else "Online Mode is OFF — Sara runs fully offline",fontSize=11.sp,color=if(onlineModeOn) Color(0xFF22C55E) else Color(0xFF9AA7C8))
+        }
+        Text(if(apiKeyConfigured) "API key: configured (hidden)" else "API key: not configured",fontSize=11.sp,color=if(apiKeyConfigured) Color(0xFF22C55E) else Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
         OutlinedTextField(
             value=apiKeyInput,onValueChange={apiKeyInput=it},
             label={Text("Groq API key",fontSize=10.sp)},
@@ -2252,11 +2285,11 @@ private data class NanoSession(
             savedNotice="Settings saved."
         },modifier=Modifier.padding(top=6.dp)){Text("Save provider settings",fontSize=10.sp)}
         savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF22C55E),modifier=Modifier.padding(top=4.dp)) }
-        Text("Values are clamped to safe ranges automatically. Sara runs entirely on Groq — chat, tools and coding tasks all require this key.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text("Values are clamped to safe ranges automatically. These settings only take effect while Online Mode above is ON — with it off, Sara never contacts Groq.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
         Divider(Modifier.padding(top=14.dp))
 
-        Text("AI Provider — Offline Local LLM",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
-        Text("This build does not bundle an on-device inference runtime yet, so a configured GGUF model is validated but cannot run locally. Sara now uses Groq only for chat — this section is for managing a stored model file, nothing here is used automatically.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
+        Text("AI Provider — Offline Local LLM (default)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))
+        Text("This is what Sara uses by default (Online Mode above is off). Real on-device inference runs through the imported GGUF model below — deterministic commands (calculator, device time/date, etc.) still resolve instantly without the model; everything else is answered by it directly.",fontSize=10.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=6.dp))
         Text(if(localPath.isBlank()) "Model: not configured" else "Model: configured (${java.io.File(localPath).length() / (1024*1024)} MiB)",fontSize=10.sp,color=if(localPath.isBlank()) Color(0xFFF59E0B) else Color(0xFF22C55E),modifier=Modifier.padding(top=6.dp))
         Row(Modifier.padding(top=6.dp),verticalAlignment=Alignment.CenterVertically){
             TextButton(onClick={ if(!localBusy) modelPicker.launch(arrayOf("application/octet-stream","application/*","*/*")) },enabled=!localBusy){Text(if(localBusy) "Importing…" else "Select GGUF model",fontSize=10.sp)}
@@ -2281,7 +2314,7 @@ private data class NanoSession(
         }
         TextButton(onClick={ store.setLocalContextSize(localContext.toIntOrNull() ?: 2048); store.setLocalThreads(localThreads.toIntOrNull() ?: 4); store.setLocalMaxOutputTokens(localMaxTokens.toIntOrNull() ?: 256); localContext=store.getLocalContextSize().toString(); localThreads=store.getLocalThreads().toString(); localMaxTokens=store.getLocalMaxOutputTokens().toString(); localStatus="Offline model settings saved." },modifier=Modifier.padding(top=4.dp)){Text("Save offline settings",fontSize=10.sp)}
         localStatus?.let { Text(it,fontSize=9.sp,color=Color(0xFF9AA7C8),modifier=Modifier.padding(top=4.dp)) }
-        Text("Recommended starting point: a small Q4 GGUF model such as Qwen2.5 0.5B (~400 MiB). The model is not bundled or downloaded by Sara; import the GGUF yourself. On-device inference is not wired in yet in this build, so imported models are stored and validated but Groq handles actual requests for now.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text("Recommended starting point: a small Q4 GGUF model such as Qwen2.5 0.5B (~400 MiB). The model is not bundled or downloaded by Sara; import the GGUF yourself. It loads on first offline request after import and stays loaded until you Unload or Remove it here.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
 
         Text("Security",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp));Text("Sensitive actions require confirmation. Secrets are not stored in source code, logs, or plaintext preferences — the Groq key lives only in the Android-Keystore-backed secure store.",fontSize=11.sp,color=Color(0xFF9AA7C8))
     }

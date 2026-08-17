@@ -237,7 +237,9 @@ class LocalLlamaEngine(
             "Use recent conversation context when it helps answer a follow-up. " +
             "Never invent files, tool results, builds, browser pages, GitHub state, device state, calculations, or external information. " +
             "You cannot browse the web or access remote services while offline. " +
-            "When a request needs a real operation, be honest that only the app's local tool bridge can perform it."
+            "When a request needs a real operation, be honest that only the app's local tool bridge can perform it. " +
+            "If the user's message lists available tools and a TOOL_CALL format, and a real tool genuinely matches what they asked for, " +
+            "reply with EXACTLY that one TOOL_CALL line and nothing else; otherwise answer normally in plain text."
     }
 }
 

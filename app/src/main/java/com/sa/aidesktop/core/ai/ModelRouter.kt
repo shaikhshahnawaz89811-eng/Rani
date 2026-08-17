@@ -7,12 +7,18 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Single AI router for the desktop.
  *
- * Groq is the only reasoning/tool provider. Local tool requests that can be identified without
- * model function-calling (e.g. "2+2", device time/date) are handled deterministically by
- * LocalIntentRouter using the same real ToolRegistry and ToolExecutionGateway — that is plain
- * tool matching, not an offline AI model. Everything else requires Groq; if no API key is set or
- * a Groq call fails, the router returns the real reason honestly instead of silently handing the
- * request to an unconfigured local GGUF model.
+ * Offline (the on-device GGUF model via [LocalLlamaEngine]) is the default, always-available
+ * tier for every request, a to z. Deterministic local commands that can be identified without
+ * any model (e.g. "2+2", device time/date) are still matched first by LocalIntentRouter using the
+ * same real ToolRegistry and ToolExecutionGateway — that is plain tool matching, not model
+ * inference — and everything else that doesn't match a deterministic command is answered by the
+ * real local model through [offline].
+ *
+ * Groq is opt-in only: it is used ONLY when [onlineModeEnabled] returns true (the user turned on
+ * "Online Mode" in Settings) AND a Groq API key is configured. Groq is never reached silently —
+ * with online mode off (the default), this router does not touch Groq at all. When online mode is
+ * on but the key is missing or a Groq call fails, the router still returns the real, honest reason
+ * instead of silently substituting a different tier.
  */
 enum class RouterTier { ONLINE_GROQ, OFFLINE_LOCAL, OFFLINE_LOCAL_UNAVAILABLE }
 
@@ -64,10 +70,20 @@ class ModelRouter(
     private val offline: AIService,
     private val hasApiKey: () -> Boolean,
     private val settingsProvider: () -> GroqSettings,
-    private val toolRegistry: ToolRegistry
+    private val toolRegistry: ToolRegistry,
+    // Groq is opt-in. Defaults to true so every existing caller/test that doesn't pass this
+    // (they all predate the offline-default flow) keeps exercising the Groq path exactly as
+    // before; the real app wiring in SADesktopApp.kt passes the user's actual Settings toggle,
+    // which itself defaults to false (offline-first) in AISettingsStore.
+    private val onlineModeEnabled: () -> Boolean = { true }
 ) : AIService {
 
     @Volatile private var status = RouterStatus(null, null, 0)
+
+    // Rule 1 fix: gives the offline tier the same real tool-execution ability the Groq path
+    // already has (see LocalToolCallLoop.kt). Built once, reused across calls — no per-request
+    // allocation, no change to the Groq path below.
+    private val localToolLoop = LocalToolCallLoop(offline, toolRegistry)
 
     // A single generic "Thinking…" label for the whole call hid what Sara was actually doing
     // (writing code vs opening a browser vs running a shell command). This reflects the real
@@ -136,16 +152,24 @@ class ModelRouter(
         }
         pushStep(WorkflowStepKind.PLANNING, "Planning", "Understanding your request")
 
+        // Offline is the default tier for every request. Groq is only reached below when the
+        // user has explicitly turned on Online Mode in Settings — with it off, this call never
+        // touches hasApiKey()/Groq at all.
+        if (!onlineModeEnabled()) {
+            return runOfflineFirst(request)
+        }
+
         if (!hasApiKey()) {
             status = status.copy(
                 lastTier = RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
                 lastError = "No Groq API key configured."
             )
 
-            // Groq is the only AI brain. Explicit, unambiguous local commands can still be
-            // resolved deterministically through real tools (no model inference involved), but
-            // anything that needs real reasoning honestly requires a Groq key — it is never
-            // silently handed to the offline/local model.
+            // We only reach here because the user turned Online Mode ON but hasn't set a Groq key
+            // yet. Explicit, unambiguous local commands can still be resolved deterministically
+            // through real tools (no model inference involved); anything else honestly needs the
+            // key — it is never silently handed to the offline/local model behind the user's back
+            // (if they want offline, they can simply turn Online Mode back off).
             val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
             if (localIntent != null) {
                 pushStep(WorkflowStepKind.INVESTIGATING, "Investigating", "Matching a local command (no Groq key)")
@@ -370,6 +394,64 @@ class ModelRouter(
                 toolTrace = trace + "STOPPED: maximum tool rounds reached"
             )
         )
+    }
+
+    /** The default a-to-z path when Online Mode is off. Deterministic commands still go through
+     *  LocalIntentRouter first (same real tools, no model involved, fastest and most reliable for
+     *  the handful of things it recognizes). Everything else is answered by the real on-device
+     *  GGUF model through [offline] — never by Groq, and never by pretending success if the local
+     *  model genuinely isn't ready (no model imported, failed to load, etc.); that real reason is
+     *  returned honestly, the same way a Groq failure is never hidden in the online path above. */
+    private suspend fun runOfflineFirst(request: AIRequest): AIResult<AIResponse> {
+        val localIntent = LocalIntentRouter.resolve(request.prompt, toolRegistry)
+        if (localIntent != null) {
+            pushStep(WorkflowStepKind.INVESTIGATING, "Investigating", "Matching a local command (offline)")
+            val result = executeLocalIntent(localIntent, request)
+            if (result is AIResult.Success) {
+                finishWorkflow(WorkflowStepKind.SUCCESS, "Completed", "Local command finished")
+            } else {
+                finishWorkflow(WorkflowStepKind.ERROR, "Error", "Local command failed")
+            }
+            return result
+        }
+
+        pushStep(WorkflowStepKind.ANALYZING, "Analyzing", "Running the on-device model")
+        // Was: offline.chat(request) — a single one-shot text call with no way to reach
+        // write_file/run_terminal. localToolLoop.run() keeps that same offline.chat() call as its
+        // building block but lets the local model request a real tool (bounded rounds, same
+        // approval gate Groq uses for WRITE/EXECUTION) before it has to give a final answer.
+        return when (val result = localToolLoop.run(request)) {
+            is AIResult.Success -> {
+                status = status.copy(
+                    lastTier = RouterTier.OFFLINE_LOCAL,
+                    lastError = null,
+                    consecutiveOnlineFailures = 0
+                )
+                val hasPendingApproval = result.value.toolRequests.isNotEmpty()
+                if (hasPendingApproval) {
+                    pushStep(
+                        WorkflowStepKind.EDITING,
+                        "Editing",
+                        "Waiting for approval: ${result.value.toolRequests.joinToString { it.toolId }}"
+                    )
+                }
+                finishWorkflow(
+                    WorkflowStepKind.SUCCESS,
+                    "Completed",
+                    if (hasPendingApproval) "Offline response ready (approval needed)" else "Offline response ready"
+                )
+                result
+            }
+            is AIResult.Failure -> {
+                val realError = describeAiError(result.error)
+                status = status.copy(
+                    lastTier = RouterTier.OFFLINE_LOCAL_UNAVAILABLE,
+                    lastError = realError
+                )
+                finishWorkflow(WorkflowStepKind.ERROR, "Error", realError)
+                result
+            }
+        }
     }
 
     private suspend fun executeLocalIntent(

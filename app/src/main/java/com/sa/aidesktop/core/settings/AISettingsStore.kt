@@ -21,6 +21,11 @@ class AISettingsStore(
 ) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    /** Groq is opt-in. Default false: the app runs entirely on the offline on-device model until
+     *  the user explicitly turns this on in Settings. */
+    fun isOnlineModeEnabled(): Boolean = prefs.getBoolean(KEY_ONLINE_MODE, false)
+    fun setOnlineModeEnabled(value: Boolean) { prefs.edit().putBoolean(KEY_ONLINE_MODE, value).apply() }
+
     fun getApiKey(): String? = secureStore.get(KEY_API_KEY)?.takeIf { it.isNotBlank() }
     fun hasApiKey(): Boolean = !getApiKey().isNullOrBlank()
     fun setApiKey(value: String) {
@@ -69,6 +74,7 @@ class AISettingsStore(
 
     private companion object {
         const val PREFS_NAME = "sa_ai_settings"
+        const val KEY_ONLINE_MODE = "online_mode_enabled"
         const val KEY_API_KEY = "groq_api_key"
         const val KEY_MODEL = "groq_model"
         const val KEY_TIMEOUT = "groq_timeout_ms"
