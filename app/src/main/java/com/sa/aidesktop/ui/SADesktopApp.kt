@@ -1,5 +1,6 @@
 package com.sa.aidesktop.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
@@ -131,6 +132,24 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
     val githubApi = remember(githubAccounts) { GitHubApiClient(githubAccounts) }
     LaunchedEffect(Unit) { listOf(WindowType.DEVELOPER, WindowType.AI, WindowType.TERMINAL, WindowType.GIT, WindowType.FILES).forEach(manager::open); manager.focus("ai") }
     var startOpen by remember { mutableStateOf(false) }
+
+    // Rule 1 fix (missing counterpart, Rule 8): this whole screen is a single Activity hosting a
+    // desktop-style window manager, but until now nothing here ever intercepted the system
+    // back gesture/button. Its default behavior — finish the Activity — meant a single accidental
+    // back gesture while typing (e.g. an edge swipe) closed the ENTIRE app straight to the phone's
+    // home screen, discarding whatever was mid-typed in a chat/terminal box, instead of just
+    // closing the one open window like every other desktop UI does. This only intercepts back
+    // while a real window (Start menu or an open window) is showing; with the desktop truly empty
+    // it is disabled so back falls through to the normal, expected "exit app" behavior.
+    // Minimize (not close) is used so the window's own state — e.g. an in-progress chat message or
+    // unsent AI Assistant text — is preserved on the taskbar instead of being torn down.
+    val openWindows = windows.filter { it.state != WindowState.MINIMIZED }
+    BackHandler(enabled = startOpen || openWindows.isNotEmpty()) {
+        when {
+            startOpen -> startOpen = false
+            else -> openWindows.maxByOrNull { it.z }?.let { manager.minimize(it.id) }
+        }
+    }
     // BUG FIX (video timestamps 00:05-00:25): enableEdgeToEdge() in MainActivity draws the
     // Compose content underneath the Android status bar and navigation bar, but this Box
     // previously never consumed those insets. That let window title bars (with the close/
@@ -153,7 +172,7 @@ private fun formatAgentTaskStatus(r: AgentTaskRecord): String = buildString {
         LaunchedEffect(maxWidth.value, maxHeight.value) { manager.clampToWorkspace(maxWidth.value, (maxHeight.value - TASKBAR_HEIGHT).coerceAtLeast(1f)) }
         DesktopBackdrop()
         DesktopIcons(onOpen = { if (it == WindowType.BROWSER) manager.openNew(it) else manager.open(it) })
-        windows.filter { it.state != WindowState.MINIMIZED }.sortedBy { it.z }.forEach { w ->
+        openWindows.sortedBy { it.z }.forEach { w ->
             DesktopWindowView(w, maxWidth.value, maxHeight.value - TASKBAR_HEIGHT, files, terminal, terminalLiveOutput, browser, githubAccounts, githubApi, settingsStore, offlineAi)
         }
         Taskbar(windows, startOpen, { startOpen = !startOpen }, { manager.open(it); startOpen = false }, Modifier.align(Alignment.BottomCenter))
