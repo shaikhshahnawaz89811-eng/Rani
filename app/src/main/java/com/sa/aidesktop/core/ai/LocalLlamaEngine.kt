@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * On-device GGUF model adapter — real inference.
@@ -82,9 +83,28 @@ class LocalLlamaEngine(
         state = LocalModelState.LOADING
         if (loadedPath != null && loadedPath != canonical) releaseNativeIfLoaded()
         applyGenerationParams(configProvider().toLlamaConfig())
-        val ok = withContext(Dispatchers.IO) {
-            runCatching { LlamaBridge.initGenerateModel(canonical) }
-        }.getOrElse { t ->
+        // TIMEOUT FIX (root cause of the "hello gets no reply, Thinking panel stuck" bug): this
+        // used to be a plain withContext(Dispatchers.IO) with no time bound at all, so a large
+        // GGUF (e.g. a ~2GB Qwen2.5-Coder file) being mmap'd/loaded on a phone CPU could sit here
+        // for minutes with the chat UI showing "Analyzing — Running the on-device model" and no
+        // way to tell load was even the step in progress. withTimeoutOrNull bounds that wait; a
+        // null result here means the coroutine gave up waiting, NOT that the native load stopped
+        // (LlamaBridge is a JNI call — coroutine cancellation cannot interrupt it mid-call, same
+        // honest caveat SADesktopApp.kt's stopAiResponse() already documents for generation).
+        val outcome = withTimeoutOrNull(LOAD_TIMEOUT_MS) {
+            withContext(Dispatchers.IO) { runCatching { LlamaBridge.initGenerateModel(canonical) } }
+        }
+        if (outcome == null) {
+            loadedPath = null
+            return setStatus(
+                LocalModelState.FAILED,
+                "Loading this local GGUF model timed out after ${LOAD_TIMEOUT_MS / 1000}s. It may still be " +
+                    "loading in the background (a native call can't be interrupted once started) — wait a bit " +
+                    "before retrying. If this keeps happening, the model is likely too large for this device; " +
+                    "try a smaller/more-quantized GGUF file."
+            )
+        }
+        val ok = outcome.getOrElse { t ->
             loadedPath = null
             return setStatus(
                 LocalModelState.FAILED,
@@ -154,15 +174,35 @@ class LocalLlamaEngine(
         // THREADING FIX: real token generation is the heaviest native call in this class and was
         // previously running on whatever dispatcher called generate() (Main, from the chat
         // screen) — pushed onto Dispatchers.IO so it can no longer freeze the UI/ANR the app.
-        val raw = withContext(Dispatchers.IO) {
-            runCatching {
-                LlamaBridge.generateWithContext(
-                    LOCAL_SYSTEM_PROMPT,
-                    fitContextToBudget(request, effectivePrompt, cfg),
-                    effectivePrompt
-                )
+        //
+        // TIMEOUT FIX: this call previously had no time bound either, so a slow/stuck native
+        // generate() left the chat's "Thinking"/"Analyzing" step running forever with nothing
+        // ever coming back — exactly the "hello ka koi reply nahi aata" symptom. withTimeoutOrNull
+        // gives it a hard ceiling so the caller (ModelRouter) gets a real Failure back and can
+        // show an actual error instead of an indefinite spinner. As with the load timeout above,
+        // a timeout here only stops *waiting* for the native call — it cannot interrupt the JNI
+        // call itself, so the model may still keep computing in the background.
+        val outcome = withTimeoutOrNull(GENERATE_TIMEOUT_MS) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    LlamaBridge.generateWithContext(
+                        LOCAL_SYSTEM_PROMPT,
+                        fitContextToBudget(request, effectivePrompt, cfg),
+                        effectivePrompt
+                    )
+                }
             }
-        }.getOrElse { t ->
+        }
+        if (outcome == null) {
+            return@withLock AIResult.Failure(
+                AIError.Execution(
+                    "Local model generation timed out after ${GENERATE_TIMEOUT_MS / 1000}s. It may still be " +
+                        "running in the background (a native call can't be interrupted once started) — try " +
+                        "again in a bit, or switch to a smaller/more-quantized GGUF model if this keeps happening."
+                )
+            )
+        }
+        val raw = outcome.getOrElse { t ->
             return@withLock AIResult.Failure(
                 AIError.Execution("Local model generation failed: ${t.message ?: t::class.simpleName}")
             )
@@ -284,6 +324,12 @@ class LocalLlamaEngine(
         private const val DEFAULT_REPEAT_PENALTY = 1.1f
         private const val DEFAULT_BATCH_SIZE = 512
         private const val MAX_HISTORY_TURNS = 10
+        // Bounds for the two real native LlamaBridge calls this class makes (see the TIMEOUT FIX
+        // comments at each call site). Generous on purpose — a real ~2GB GGUF file genuinely can
+        // take a while to mmap/load on a phone CPU, and generation itself is slower than a cloud
+        // API — these are meant to catch a genuinely stuck/too-slow call, not a normal-but-slow one.
+        private const val LOAD_TIMEOUT_MS = 120_000L
+        private const val GENERATE_TIMEOUT_MS = 90_000L
         // ~4 characters per token is the standard rough heuristic for English/code text without a
         // real tokenizer on this path (Llamatik does not expose a client-side tokenizer call).
         private const val CHARS_PER_TOKEN_ESTIMATE = 4
