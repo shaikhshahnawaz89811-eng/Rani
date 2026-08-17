@@ -59,6 +59,8 @@ import com.sa.aidesktop.core.coding.*
 import com.sa.aidesktop.core.window.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.runtime.DisposableEffect
 import com.sa.aidesktop.core.voice.AndroidTextToSpeechEngine
@@ -1170,6 +1172,14 @@ private fun isPureToolTrace(text: String): Boolean {
     val scope = rememberCoroutineScope()
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    // Rule 15 sub-helper state: tracks the in-flight AI turn's own Job so it — and only it, not
+    // the terminal's separate stopCommand() Job — can be stopped from the chat UI. Real
+    // limitation (disclosed honestly, Rule 10): LlamaBridge's native call is a plain blocking JNI
+    // call, so cancelling this Job cannot interrupt it mid-token the way it can a suspending
+    // coroutine; it frees the UI/input immediately, but the native call — and the mutex inside
+    // LocalLlamaEngine it holds — may keep running in the background until it finishes on its
+    // own. stopAiResponse() below is honest about that in the message it posts.
+    var aiJob by remember { mutableStateOf<Job?>(null) }
     var pending by remember { mutableStateOf<ToolRequest?>(null) }
     var pendingQueue by remember { mutableStateOf<List<ToolRequest>>(emptyList()) }
     var appliedBatchResults by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -1244,6 +1254,13 @@ private fun isPureToolTrace(text: String): Boolean {
         // typed — the chat looked cleared but old task context wasn't. Cancel any active/resumable
         // task as part of clearing, so "clear chat" genuinely means a fresh start.
         if (taskEngine.current() != null) taskEngine.cancel()
+        // Same reasoning as the task-cancel above, extended to a stray AI turn (Rule 4: keep this
+        // consistent with stopAiResponse()'s own cancel — one cancel-path, not two divergent
+        // ones): without this, an in-flight offline/Groq call could still land its busy=false and
+        // append a message into the just-cleared chat a moment later.
+        aiJob?.cancel(CancellationException("Chat cleared by user"))
+        aiJob = null
+        busy = false
         msgs.clear()
         msgs.add(
             AIMessage(
@@ -1283,7 +1300,7 @@ private fun isPureToolTrace(text: String): Boolean {
         pendingChatPrompt = null
         lastToolTrace = emptyList()
 
-        scope.launch {
+        aiJob = scope.launch {
             if (isAgentTaskRequest(p)) {
                 val run = taskEngine.start(
                     p,
@@ -1338,7 +1355,25 @@ private fun isPureToolTrace(text: String): Boolean {
             }
             tier = router.currentStatus().lastTier
             busy = false
+            aiJob = null
         }
+    }
+
+    // Rule 15 sub-helper (single job: stop the CURRENT in-flight AI turn, nothing else). Real,
+    // honest behavior — see the aiJob comment above: this frees the UI right away so the user can
+    // type/send the next message; it does NOT guarantee the native on-device call has actually
+    // stopped, so the message it posts says that plainly instead of implying an instant hard-stop.
+    fun stopAiResponse() {
+        aiJob?.cancel(CancellationException("Stopped by user"))
+        aiJob = null
+        busy = false
+        msgs.add(
+            AIMessage(
+                "Response stopped. Agar ye offline (on-device) model tha, to wo background mein thodi der ke liye chalta reh sakta hai — agla message turant bhej sakte ho.",
+                false,
+                "Now"
+            )
+        )
     }
 
     // Rule 12 (design-first) / Rule 21 (existing-behavior preserving): the window can be dragged
@@ -1530,13 +1565,32 @@ private fun isPureToolTrace(text: String): Boolean {
                         // as the Thinking Details panel below (Rule 4: one chain, not two
                         // divergent visuals) — falls back to a plain pulse only before the
                         // router has pushed its first real step yet.
-                        val openKind = workflowSteps.lastOrNull { it.endedAtMs == null }?.kind
-                        StepAnimationIndicator(openKind ?: WorkflowStepKind.PLANNING, Color(0xFFF59E0B), Modifier.size(13.dp))
+                        val openStep = workflowSteps.lastOrNull { it.endedAtMs == null }
+                        StepAnimationIndicator(openStep?.kind ?: WorkflowStepKind.PLANNING, Color(0xFFF59E0B), Modifier.size(13.dp))
                         Spacer(Modifier.width(7.dp))
-                        Text(activity,fontSize=11.sp,color=Color(0xFFF59E0B))
-                        if (workflowSteps.isNotEmpty()) {
-                            Spacer(Modifier.width(7.dp))
-                            Text("• Tap to view details",fontSize=9.sp,color=Color(0xFF7C86A6))
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(activity,fontSize=11.sp,color=Color(0xFFF59E0B))
+                                if (workflowSteps.isNotEmpty()) {
+                                    Spacer(Modifier.width(7.dp))
+                                    Text("• Tap to view details",fontSize=9.sp,color=Color(0xFF7C86A6))
+                                }
+                            }
+                            // Rule 13/14 fix: previously this bubble never changed while the local
+                            // model was genuinely still working (minutes on a large offline GGUF
+                            // model), which read as a stuck app. elapsedSec is the real, same
+                            // startedAtMs already used by ThinkingDetailsPanel's own timer below —
+                            // not a separate guessed clock — so both stay in sync (Rule 4).
+                            val elapsedSec = openStep?.let { ((nowMs - it.startedAtMs) / 1000).coerceAtLeast(0) } ?: 0L
+                            if (elapsedSec >= 30) {
+                                Text(
+                                    if (elapsedSec >= 90)
+                                        "${elapsedSec}s • bada offline model hai, isme kuch minute lag sakte hain — Stop button se rok sakte ho"
+                                    else
+                                        "${elapsedSec}s • abhi bhi kaam ho raha hai",
+                                    fontSize=9.sp,color=Color(0xFF7C86A6)
+                                )
+                            }
                         }
                     }
                 }
@@ -1812,7 +1866,15 @@ private fun isPureToolTrace(text: String): Boolean {
             }
             IconButton({ voiceScope.launch { msgs.lastOrNull { !it.fromUser }?.let { tts.speak(it.text) } } }){Icon(Icons.Default.VolumeUp,"Speak",tint=Color(0xFF00BFFF))}
             IconButton({ if (voiceState.listening) stt.stop() else micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }){Icon(if(voiceState.listening) Icons.Default.Stop else Icons.Default.Mic,"Voice input",tint=if(voiceState.listening) Color(0xFFEF4444) else Color(0xFF00BFFF))}
-            IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFF8B5CF6))}
+            // Rule 2/14 fix: a long offline-model turn previously had no way out except waiting or
+            // force-closing the window. While busy, Send is replaced by a real Stop button wired
+            // to stopAiResponse() — same swap pattern the Terminal window already uses for its own
+            // Stop (Rule 4: same chain shape reused, not a new divergent one).
+            if (busy) {
+                IconButton({stopAiResponse()}){Icon(Icons.Default.Close,"Stop response",tint=Color(0xFFEF4444))}
+            } else {
+                IconButton({send()},enabled=!busy){Icon(Icons.Default.Send,null,tint=Color(0xFF8B5CF6))}
+            }
         }
         // Real model/token status row. Model name always comes from the actual configured
         // setting (settingsStore.getModel()); token counts come only from lastUsage, which is
