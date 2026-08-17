@@ -2,8 +2,10 @@ package com.sa.aidesktop.core.ai
 
 import com.llamatik.library.platform.LlamaBridge
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * On-device GGUF model adapter — real inference.
@@ -45,7 +47,7 @@ class LocalLlamaEngine(
 
     suspend fun load(): LocalModelStatus = mutex.withLock { loadLocked() }
 
-    private fun loadLocked(): LocalModelStatus {
+    private suspend fun loadLocked(): LocalModelStatus {
         val path = modelPathProvider()?.trim().orEmpty()
         if (path.isBlank()) {
             releaseNativeIfLoaded()
@@ -67,12 +69,22 @@ class LocalLlamaEngine(
 
     /** Sub-helper (Rule 15) — loads [canonical] into the real llama.cpp runtime via LlamaBridge,
      *  releasing any previously loaded (different) model first so native memory is never leaked
-     *  when the user switches GGUF files. */
-    private fun loadIntoNative(canonical: String): LocalModelStatus {
+     *  when the user switches GGUF files.
+     *
+     *  THREADING FIX: model load is a heavy native/CPU call (can take several seconds for a real
+     *  GGUF file). It's now pushed onto [Dispatchers.IO] via [withContext] instead of running on
+     *  whatever dispatcher the caller (e.g. the Compose chat screen's `scope.launch`, which is
+     *  Main) happened to be on. Previously this ran straight on the caller's thread, which — when
+     *  the caller was Main — froze the whole UI until it finished and could trigger an ANR
+     *  (Android force-closing the app back to the home screen), exactly the "freeze then auto
+     *  back" behavior reported. */
+    private suspend fun loadIntoNative(canonical: String): LocalModelStatus {
         state = LocalModelState.LOADING
         if (loadedPath != null && loadedPath != canonical) releaseNativeIfLoaded()
         applyGenerationParams(configProvider().toLlamaConfig())
-        val ok = runCatching { LlamaBridge.initGenerateModel(canonical) }.getOrElse { t ->
+        val ok = withContext(Dispatchers.IO) {
+            runCatching { LlamaBridge.initGenerateModel(canonical) }
+        }.getOrElse { t ->
             loadedPath = null
             return setStatus(
                 LocalModelState.FAILED,
@@ -117,8 +129,8 @@ class LocalLlamaEngine(
         )
     }
 
-    private fun releaseNativeIfLoaded() {
-        if (loadedPath != null) runCatching { LlamaBridge.shutdown() }
+    private suspend fun releaseNativeIfLoaded() {
+        if (loadedPath != null) withContext(Dispatchers.IO) { runCatching { LlamaBridge.shutdown() } }
         loadedPath = null
     }
 
@@ -127,12 +139,17 @@ class LocalLlamaEngine(
         if (loaded.state != LocalModelState.READY) {
             return@withLock AIResult.Failure(AIError.ModelUnavailable(loaded.error ?: "Local model is unavailable."))
         }
-        val raw = runCatching {
-            LlamaBridge.generateWithContext(
-                LOCAL_SYSTEM_PROMPT,
-                fitContextToBudget(request, configProvider().toLlamaConfig()),
-                request.prompt.trim()
-            )
+        // THREADING FIX: real token generation is the heaviest native call in this class and was
+        // previously running on whatever dispatcher called generate() (Main, from the chat
+        // screen) — pushed onto Dispatchers.IO so it can no longer freeze the UI/ANR the app.
+        val raw = withContext(Dispatchers.IO) {
+            runCatching {
+                LlamaBridge.generateWithContext(
+                    LOCAL_SYSTEM_PROMPT,
+                    fitContextToBudget(request, configProvider().toLlamaConfig()),
+                    request.prompt.trim()
+                )
+            }
         }.getOrElse { t ->
             return@withLock AIResult.Failure(
                 AIError.Execution("Local model generation failed: ${t.message ?: t::class.simpleName}")
