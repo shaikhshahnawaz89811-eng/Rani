@@ -1,6 +1,7 @@
 package com.sa.aidesktop.core.settings
 
 import android.content.Context
+import com.sa.aidesktop.core.ai.GroqClient
 import com.sa.aidesktop.core.ai.GroqSettings
 import com.sa.aidesktop.core.security.SecureStore
 
@@ -36,6 +37,20 @@ class AISettingsStore(
 
     fun getModel(): String = prefs.getString(KEY_MODEL, GroqSettings.DEFAULT_MODEL) ?: GroqSettings.DEFAULT_MODEL
     fun setModel(value: String) { prefs.edit().putString(KEY_MODEL, value.trim().ifBlank { GroqSettings.DEFAULT_MODEL }).apply() }
+
+    /** Chat-completions endpoint the online provider is called on. Defaults to Groq's own
+     *  official endpoint (unchanged existing behavior) - a real, non-blank value is always
+     *  returned so nothing else has to null-check this. Overriding it lets this same
+     *  Groq-shaped client talk to any other OpenAI-compatible "/v1/chat/completions" server -
+     *  e.g. a paired phone running Brain's Local API Server on the LAN - since the wire format
+     *  (Bearer auth, messages[], tool_calls, streaming) is identical either way. */
+    fun getEndpoint(): String = prefs.getString(KEY_ENDPOINT, GroqClient.ENDPOINT)?.takeIf { it.isNotBlank() } ?: GroqClient.ENDPOINT
+    fun setEndpoint(value: String) {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) prefs.edit().remove(KEY_ENDPOINT).apply()
+        else prefs.edit().putString(KEY_ENDPOINT, trimmed).apply()
+    }
+    fun isUsingCustomEndpoint(): Boolean = getEndpoint() != GroqClient.ENDPOINT
 
     fun getTimeoutMs(): Int = prefs.getInt(KEY_TIMEOUT, GroqSettings.DEFAULT_TIMEOUT_MS)
         .coerceIn(GroqSettings.MIN_TIMEOUT_MS, GroqSettings.MAX_TIMEOUT_MS)
@@ -77,6 +92,7 @@ class AISettingsStore(
         const val KEY_ONLINE_MODE = "online_mode_enabled"
         const val KEY_API_KEY = "groq_api_key"
         const val KEY_MODEL = "groq_model"
+        const val KEY_ENDPOINT = "groq_endpoint"
         const val KEY_TIMEOUT = "groq_timeout_ms"
         const val KEY_RETRY = "groq_retry_limit"
         const val KEY_MAX_TOKENS = "groq_max_output_tokens"

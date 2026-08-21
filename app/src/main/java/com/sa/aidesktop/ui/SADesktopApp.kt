@@ -1113,7 +1113,10 @@ private fun isPureToolTrace(text: String): Boolean {
 
     // Groq is opt-in (Settings > Online Mode) and, when on, uses the same registry/gateway as the
     // offline path — there is no second hidden tool system. Offline is the real default tier.
-    val groqClient = remember { GroqClient(apiKeyProvider = { settingsStore.getApiKey() }) }
+    // endpointProvider is read fresh on every call (see GroqClient) - so pointing this at a
+    // paired phone's Brain Local API Server (Settings > Online Mode > Endpoint) takes effect
+    // immediately, same as the API key already does, with no other change to this call site.
+    val groqClient = remember { GroqClient(apiKeyProvider = { settingsStore.getApiKey() }, endpointProvider = { settingsStore.getEndpoint() }) }
     val router = remember(tools, offlineAi) {
         ModelRouter(
             groqClient,
@@ -2298,6 +2301,7 @@ private data class NanoSession(
     var apiKeyInput by remember{ mutableStateOf("") }
     var apiKeyConfigured by remember{ mutableStateOf(store.hasApiKey()) }
     var model by remember{ mutableStateOf(store.getModel()) }
+    var endpoint by remember{ mutableStateOf(store.getEndpoint()) }
     var timeoutSeconds by remember{ mutableStateOf((store.getTimeoutMs()/1000).toString()) }
     var retryLimit by remember{ mutableStateOf(store.getRetryLimit().toString()) }
     var maxTokens by remember{ mutableStateOf(store.getMaxOutputTokens()?.toString() ?: "") }
@@ -2352,6 +2356,19 @@ private data class NanoSession(
             TextButton(onClick={ store.clearApiKey(); apiKeyConfigured=false; savedNotice="API key removed." }){Text("Remove key",fontSize=10.sp,color=Color(0xFFEF4444))}
         }
         OutlinedTextField(value=model,onValueChange={model=it},label={Text("Groq model",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=10.dp))
+        // Same client, different server: this key/model/timeout/retry setup already speaks the
+        // OpenAI-compatible "/v1/chat/completions" wire format Groq uses, so pointing it at any
+        // other server that speaks the same format — e.g. Brain's Local API Server running on a
+        // paired phone's LAN address — makes that server usable here with zero other code changes.
+        // Left blank/unset, this stays Groq's own official endpoint exactly as before.
+        OutlinedTextField(
+            value=endpoint,onValueChange={endpoint=it},
+            label={Text("Endpoint (default: Groq — paste a LAN URL, e.g. Brain's, to use that instead)",fontSize=10.sp)},
+            singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=10.dp)
+        )
+        Row(Modifier.padding(top=4.dp)){
+            TextButton(onClick={ endpoint = com.sa.aidesktop.core.ai.GroqClient.ENDPOINT; store.setEndpoint(endpoint); savedNotice="Reset to Groq's endpoint." }){Text("Reset to Groq",fontSize=10.sp)}
+        }
         Row(Modifier.fillMaxWidth().padding(top=8.dp)){
             OutlinedTextField(value=timeoutSeconds,onValueChange={timeoutSeconds=it.filter(Char::isDigit)},label={Text("Timeout (sec)",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f).padding(end=6.dp))
             OutlinedTextField(value=retryLimit,onValueChange={retryLimit=it.filter(Char::isDigit)},label={Text("Retry limit",fontSize=10.sp)},singleLine=true,modifier=Modifier.weight(1f))
@@ -2359,14 +2376,16 @@ private data class NanoSession(
         OutlinedTextField(value=maxTokens,onValueChange={maxTokens=it.filter(Char::isDigit)},label={Text("Max output tokens (blank = provider default)",fontSize=10.sp)},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp))
         TextButton(onClick={
             store.setModel(model)
+            store.setEndpoint(endpoint)
             timeoutSeconds.toIntOrNull()?.let{ store.setTimeoutMs(it*1000) }
             retryLimit.toIntOrNull()?.let{ store.setRetryLimit(it) }
             store.setMaxOutputTokens(maxTokens.toIntOrNull())
-            model=store.getModel();timeoutSeconds=(store.getTimeoutMs()/1000).toString();retryLimit=store.getRetryLimit().toString();maxTokens=store.getMaxOutputTokens()?.toString()?:""
+            model=store.getModel();endpoint=store.getEndpoint();timeoutSeconds=(store.getTimeoutMs()/1000).toString();retryLimit=store.getRetryLimit().toString();maxTokens=store.getMaxOutputTokens()?.toString()?:""
             savedNotice="Settings saved."
         },modifier=Modifier.padding(top=6.dp)){Text("Save provider settings",fontSize=10.sp)}
         savedNotice?.let{ Text(it,fontSize=9.sp,color=Color(0xFF22C55E),modifier=Modifier.padding(top=4.dp)) }
-        Text("Values are clamped to safe ranges automatically. These settings only take effect while Online Mode above is ON — with it off, Sara never contacts Groq.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text(if(store.isUsingCustomEndpoint()) "Using a custom endpoint — everything below (retries, tool calls, streaming, usage) still works the same way, since it's the same OpenAI-compatible wire format." else "Values are clamped to safe ranges automatically.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=6.dp))
+        Text("These settings only take effect while Online Mode above is ON — with it off, Sara never contacts this endpoint.",fontSize=9.sp,color=Color(0xFF7C86A6),modifier=Modifier.padding(top=2.dp))
         Divider(Modifier.padding(top=14.dp))
 
         Text("AI Provider — Offline Local LLM (default)",fontSize=13.sp,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=14.dp))

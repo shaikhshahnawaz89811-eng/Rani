@@ -47,8 +47,20 @@ class JavaHttpTransport : HttpTransport {
 class GroqClient(
     private val apiKeyProvider: () -> String?,
     private val transport: HttpTransport = JavaHttpTransport(),
-    private val endpoint: String = ENDPOINT
+    // Read fresh on every call, same pattern as apiKeyProvider above - so a
+    // user who repoints this at a LAN endpoint (e.g. Brain's Local API
+    // Server on a paired phone) in Settings has it take effect on the very
+    // next message, not just after an app restart. Kept back-compatible:
+    // any existing caller passing a plain String still works unchanged via
+    // the secondary constructor below.
+    private val endpointProvider: () -> String = { ENDPOINT }
 ) : GroqChatEngine {
+
+    constructor(
+        apiKeyProvider: () -> String?,
+        transport: HttpTransport = JavaHttpTransport(),
+        endpoint: String
+    ) : this(apiKeyProvider, transport, { endpoint })
 
     override suspend fun chat(
         prompt: String,
@@ -157,7 +169,7 @@ class GroqClient(
             "Content-Type" to "application/json"
         )
         val response = try {
-            transport.post(endpoint, headers, payload, settings.timeoutMs, settings.timeoutMs)
+            transport.post(endpointProvider(), headers, payload, settings.timeoutMs, settings.timeoutMs)
         } catch (e: SocketTimeoutException) {
             return GroqResult.Failure(
                 GroqError.Timeout("Groq request timed out after ${settings.timeoutMs}ms")
